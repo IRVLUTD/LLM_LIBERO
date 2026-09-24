@@ -45,14 +45,15 @@ PROVIDER_WIRE={'openai':'responses','anthropic':'messages'}
 # Per-1M-token USD rates: (regular_input, cached_input, cache_write, output),
 # keyed by the upstream model id (``provider/model``). Input/output rates are
 # the providers' published prices as of 2026-09-22. Cache sub-rates are
-# estimated (cache_write=1.25x input, cached=0.1x input) and only affect
+# estimated (cache_write=1.25x input, cached=0.1x input) except Claude Opus 5.5's
+# cached rate, which is Anthropic's published $0.20. They only affect
 # ``estimated_usd``; ``budget_charge_usd`` always bills all input at the
 # cache-write rate, so the budget stays conservative either way.
 PRICING={
     'openai/gpt-6-astra':(10.,1.,12.5,50.),
     'openai/gpt-6-luna':(0.10,0.01,0.125,0.50),
     'openai/gpt-6-sol':(2.,0.2,2.5,10.),
-    'anthropic/claude-opus-5-5':(4.,0.4,5.,20.),
+    'anthropic/claude-opus-5-5':(4.,0.2,5.,20.),
 }
 
 
