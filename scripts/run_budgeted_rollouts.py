@@ -121,7 +121,9 @@ def main() -> None:
 
     def write_summary() -> None:
         (output / "summary.json").write_text(json.dumps(
-            {"protocol": protocol, "results": results, "total_budget_charge_usd": transport.used},
+            {"protocol": protocol, "results": results,
+             "total_estimated_usd": transport.estimated,
+             "total_budget_charge_usd": transport.used},
             indent=2))
 
     try:
@@ -168,6 +170,7 @@ def main() -> None:
                        "environment_success": success, "framework_status": log.status,
                        "metrics": log.results.metrics if log.results else None,
                        "steps": last.get("steps", 0), "api_attempts": transport.calls,
+                       "estimated_usd": transport.episode_estimated,
                        "budget_charge_usd": transport.episode_used,
                        "stop_detail": transport.blocked,
                        "video": str(embodiment.episode_dir / "rollout.mp4")

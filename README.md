@@ -280,6 +280,13 @@ outputs/task02_opus_zeroshot/
   episode_00/inspect/<log>.json   episode_00/<time>_task02_init00/rollout.mp4
 ```
 
+`summary.json` reports two costs, per episode and in total:
+
+| Field | Meaning |
+|---|---|
+| `estimated_usd`, `total_estimated_usd` | Spend estimated from the reported token usage, with cache reads and writes at their own rates. Close to the provider's bill |
+| `budget_charge_usd`, `total_budget_charge_usd` | What the budget caps count. All input is charged at the cache-write rate, so this is higher than the real spend, often several times higher when most input is cached |
+
 Only models with a price row are accepted: `openai/gpt-6-astra`,
 `openai/gpt-6-luna`, `openai/gpt-6-sol`, `anthropic/claude-opus-5-5`. To add
 one, put its per-million-token prices in `PRICING` in
