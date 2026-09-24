@@ -1,0 +1,16 @@
+# Secrets: only the template is tracked.
+.env
+.env.*
+!.env.example
+
+# Local environments and the pinned upstream checkout (see README).
+.venv/
+vendor/
+
+# Rollout videos, eval logs, API audit files.
+outputs/
+logs/
+
+__pycache__/
+*.py[cod]
+*.egg-info/

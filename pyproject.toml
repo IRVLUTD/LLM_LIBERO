@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-libero"
+version = "0.1.0"
+description = "LIBERO-10 embodiment and tasks for Inspect Robots, for running LLM agents (and any other policy) on LIBERO."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["robotics", "libero", "inspect_robots", "llm-agent", "evaluation"]
+# LIBERO itself is not a dependency: install hf-libero into the same
+# environment (see README). It is only imported by the worker subprocess.
+dependencies = [
+    "inspect-robots>=0.58",
+    "inspect-robots-agent>=0.26",
+    "numpy>=1.24",
+    "httpx>=0.27",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+# Entry-point discovery: once installed, `inspect-robots list` shows these
+# without importing the package first.
+[project.entry-points."inspect_robots.embodiments"]
+libero = "inspect_robots_libero:libero_embodiment"
+
+[project.entry-points."inspect_robots.tasks"]
+libero_10 = "inspect_robots_libero:libero_10"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_libero"]
