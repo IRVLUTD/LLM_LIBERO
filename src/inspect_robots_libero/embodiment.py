@@ -50,7 +50,26 @@ BASE_DOCS = (
     "that way or loosen further. While transporting or holding an object, explicitly "
     "include gripper=1 in every move_to call, not only when first closing it, and verify "
     "the object actually followed the lift in the next observation before assuming the "
-    "grasp is secure."
+    "grasp is secure.\n\n"
+    "General manipulation guidance:\n"
+    "1. Avoid collisions: before any lateral move, lift above all nearby objects and "
+    "furniture. Do not sweep through or push objects unless the task requires it. Use "
+    "large moves in free space and small moves only in the last few centimeters near an "
+    "object.\n"
+    "2. Identify the target object carefully; similar-looking distractors may be present. "
+    "Cross-check both camera views.\n"
+    "3. A closed gripper does not mean a successful grasp. After closing, lift 3-5 cm and "
+    "confirm in both cameras that the object rose with the gripper.\n"
+    "4. Handle objects the way a person would: grasp a stable, graspable part without "
+    "pushing or tipping the object, keep it in the same orientation (usually upright) "
+    "from grasp to placement, and lower it close to the support surface before "
+    "releasing.\n"
+    "5. If the same approach fails twice, change it (grasp point, approach direction, or "
+    "a small adjustment); do not repeat the same motion.\n"
+    "6. After each move, confirm from the next observation that it succeeded before "
+    "starting the next step; do not assume success.\n"
+    "7. Prefer fewer, purposeful moves over many tiny corrections; your call budget is "
+    "limited."
 )
 
 
@@ -58,7 +77,10 @@ def _action_space() -> Box:
     """Absolute end-effector pose (xyz + rot6d) plus a continuous gripper command."""
     return Box(
         shape=(10,),
-        low=np.array([-0.6, -0.6, 0.5, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 0.0]),
+        # Living-room tables sit at z=0.41, where the fingertips touch the table with the
+        # end effector at about 0.45; the floor stays just below that so flat objects are
+        # reachable without letting targets drive hard into the table.
+        low=np.array([-0.6, -0.6, 0.42, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 0.0]),
         high=np.array([0.6, 0.6, 1.6, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
         semantics=ActionSemantics(
             control_mode="eef_abs_pose",
@@ -102,7 +124,7 @@ class LiberoEmbodiment(EmbodimentBase):
             raise ConfigError("task_notes=True needs an explicit task_id.\nfix: add -E task_id=N")
         docs = BASE_DOCS
         if task_notes and self.task_id in TASK_NOTES:
-            docs += " " + TASK_NOTES[self.task_id]
+            docs += "\n\n" + TASK_NOTES[self.task_id]
         name = "libero_10" if self.task_id is None else f"libero_10_task{self.task_id:02d}"
         self.info = EmbodimentInfo(
             name=name,

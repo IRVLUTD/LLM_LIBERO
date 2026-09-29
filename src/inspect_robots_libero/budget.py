@@ -41,6 +41,12 @@ WIRE_ENDPOINTS={
 # Provider prefix (the part before '/' in an upstream model id) -> wire this
 # transport audits for it.
 PROVIDER_WIRE={'openai':'responses','anthropic':'messages'}
+# Needed for thinking.block_binding (see handle_request).
+_THINKING_BINDING_BETA='thinking-binding-controls-2026-08-01'
+# Transient server-side failures (overload, gateway errors): retried here with these
+# waits before the request counts as failed. Providers do not bill them.
+_SERVER_ERROR_STATUSES=frozenset({500,502,503,504,529})
+_SERVER_ERROR_BACKOFF_S=(15,30,60,120)
 
 # Per-1M-token USD rates: (regular_input, cached_input, cache_write, output),
 # keyed by the upstream model id (``provider/model``). Input/output rates are
@@ -205,6 +211,12 @@ class BudgetTransport(httpx.BaseTransport):
             # store, metadata's free-form shape) don't exist on this wire and
             # would risk an unexpected-field rejection if forced on here.
             output_cap=int(body.get('max_tokens') or 16000)
+            # image_horizon stubs out older camera frames, which rewrites the history
+            # that earlier thinking blocks were signed against; the API then rejects the
+            # whole request (HTTP 400). Ask it to drop those stale blocks instead.
+            thinking=body.get('thinking')
+            if isinstance(thinking,dict) and thinking.get('type')!='disabled':
+                thinking['block_binding']={'prefix_mismatch_behavior':'drop_block'}
         text,images,image_tokens=self._estimate(body)
         # Conservative local reservation, NOT a provider-guaranteed tokenizer.
         # Count all nonimage JSON bytes + per-image tokens (see _estimate) + schema overhead.
@@ -230,20 +242,31 @@ class BudgetTransport(httpx.BaseTransport):
         # Preserve authorization only in memory; never write headers to disk.
         headers=dict(request.headers)
         headers.pop('content-length',None)
+        if 'block_binding' in (body.get('thinking') or {}):
+            betas=[b for b in headers.get('anthropic-beta','').split(',') if b]
+            headers['anthropic-beta']=','.join(betas+[_THINKING_BINDING_BETA])
         outgoing=httpx.Request('POST',request.url,headers=headers,content=content,extensions=request.extensions)
         ident=f'ep{self.episode:02d}_call{self.calls:02d}'
         self.record({'event':'request_started','call':self.calls,'reservation_usd':reserve,
                      'input_token_reservation':input_reserve,'sha256':hashlib.sha256(content).hexdigest()})
         (self.output/f'{ident}_request.json').write_bytes(content)
         self.progress('waiting for the model...')
-        try:
-            response=self.inner.handle_request(outgoing)
-            response.read()
-        except Exception:
-            self.uncertain=True
-            self.record({'event':'usage_unknown','call':self.calls,'reserved_usd':reserve})
-            self.progress('network error, usage unknown; stopping')
-            raise BudgetStop('network_error_usage_unknown') from None
+        for attempt in range(len(_SERVER_ERROR_BACKOFF_S)+1):
+            try:
+                response=self.inner.handle_request(outgoing)
+                response.read()
+            except Exception:
+                self.uncertain=True
+                self.record({'event':'usage_unknown','call':self.calls,'reserved_usd':reserve})
+                self.progress('network error, usage unknown; stopping')
+                raise BudgetStop('network_error_usage_unknown') from None
+            if response.status_code not in _SERVER_ERROR_STATUSES or attempt==len(_SERVER_ERROR_BACKOFF_S):
+                break
+            wait=_SERVER_ERROR_BACKOFF_S[attempt]
+            self.record({'event':'server_error_retry','call':self.calls,
+                         'http_status':response.status_code,'wait_s':wait})
+            self.progress(f'HTTP {response.status_code} (server overloaded); retrying in {wait}s')
+            time.sleep(wait)
         payload=None
         try:
             payload=response.json()
@@ -291,6 +314,14 @@ class BudgetTransport(httpx.BaseTransport):
             if total_in>input_reserve or out>output_cap:
                 self.uncertain=True
                 data['reservation_exceeded']=True
+        elif response.status_code in _SERVER_ERROR_STATUSES:
+            # Server-side failures carry an error body and are not billed: release the
+            # reservation so this episode fails alone instead of blocking the whole run.
+            self.used-=reserve
+            self.episode_used-=reserve
+            data['released_usd']=reserve
+            self.progress(f'HTTP {response.status_code} after {len(_SERVER_ERROR_BACKOFF_S)} '
+                          'retries; not billed, this episode will stop')
         else:
             self.uncertain=True
             data['reserved_usd']=reserve
