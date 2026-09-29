@@ -36,12 +36,20 @@ def main():
     obs = None
     steps = 0
     def pack():
+        robot = env.env.robots[0]
+        # The gripper entry is the gripper's own command state, not the measured finger
+        # closure. robosuite's Panda gripper only follows the sign of 2*g-1 (it keeps
+        # closing above 0.5 and keeps opening below), and upstream interpolates each
+        # move_to from this state value. Measured closure stays low around a wide object
+        # (about 0.27 on the soup can), so a move_to(gripper=1) started from it spent
+        # several steps below 0.5 and opened the hand mid-transport. current_action is
+        # [-c, c] with c=-1 fully open and c=1 fully closed.
         return {
             'images': {k: (obs[k][::-1, ::-1] if k == 'agentview_image' else obs[k]).copy().tolist() for k in
                        ('agentview_image', 'robot0_eye_in_hand_image')},
-            'eef_state': np.concatenate((env.env.robots[0].controller.ee_pos,
-                env.env.robots[0].controller.ee_ori_mat[:, :2].T.reshape(-1),
-                [np.clip(1.0 - np.sum(np.abs(obs['robot0_gripper_qpos'])) / .08, 0, 1)])).tolist(),
+            'eef_state': np.concatenate((robot.controller.ee_pos,
+                robot.controller.ee_ori_mat[:, :2].T.reshape(-1),
+                [np.clip((robot.gripper.current_action[-1] + 1.0) / 2.0, 0, 1)])).tolist(),
             'gripper_qpos': obs['robot0_gripper_qpos'].tolist(),
             'success': bool(env.check_success()), 'steps': steps,
         }
