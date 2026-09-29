@@ -23,7 +23,6 @@ from PIL import Image
 class BudgetStop(RuntimeError):
     pass
 
-_RESERVE_OUTPUT_TOKENS=700
 # Hard backstop on estimated per-request size, independent of dollar cost --
 # protects against a single request becoming pathologically bloated. Real
 # model context windows are far larger (gpt-6-luna: 1.05M tokens per
@@ -50,9 +49,9 @@ _SERVER_ERROR_BACKOFF_S=(15,30,60,120)
 
 # Per-1M-token USD rates: (regular_input, cached_input, cache_write, output),
 # keyed by the upstream model id (``provider/model``). Input/output rates are
-# the providers' published prices as of 2026-09-22. Cache sub-rates are
-# estimated (cache_write=1.25x input, cached=0.1x input) except Claude Opus 5.5's
-# cached rate, which is Anthropic's published $0.20. They only affect
+# the providers' published prices. OpenAI input, cache, and output rates
+# were verified against official model pages on 2026-09-29. Anthropic rates
+# retain the original 2026-09-22 assumptions (cache write = 1.25x input). They only affect
 # ``estimated_usd``; ``budget_charge_usd`` always bills all input at the
 # cache-write rate, so the budget stays conservative either way.
 PRICING={
@@ -72,7 +71,10 @@ def wire_for(model):
 
 
 class BudgetTransport(httpx.BaseTransport):
-    def __init__(self, output, total_budget, episode_budget=3., inner=None, task_id=0, demo_manifest=None, max_calls=20, model='openai/gpt-6-astra', image_horizon=2):
+    def __init__(self, output, total_budget, episode_budget=3., inner=None, task_id=0, demo_manifest=None, max_calls=20, model='openai/gpt-6-astra', image_horizon=2, max_output_tokens=2048):
+        if not isinstance(max_output_tokens, int) or not 1 <= max_output_tokens <= 128000:
+            raise ValueError("max_output_tokens must be an integer in 1..128000")
+        self.max_output_tokens=max_output_tokens
         self.output=Path(output)
         self.output.mkdir(parents=True, exist_ok=True)
         self.task_id=task_id
@@ -202,9 +204,9 @@ class BudgetTransport(httpx.BaseTransport):
         if self.demo_message is not None:
             self._inject_demo(body)
         if self.wire=='responses':
-            body.update(max_output_tokens=2048, service_tier='default', store=False)
+            body.update(max_output_tokens=self.max_output_tokens, service_tier='default', store=False)
             body['metadata']={'experiment':'llm_libero_10','task_id':str(self.task_id),'episode':str(self.episode)}
-            output_cap=2048
+            output_cap=self.max_output_tokens
         else:
             # _anthropic.py already sets max_tokens on the outgoing body;
             # Responses-specific fields (max_output_tokens, service_tier,
@@ -224,15 +226,13 @@ class BudgetTransport(httpx.BaseTransport):
         input_reserve=len(json.dumps(text,ensure_ascii=False).encode())+image_tokens+4096
         too_many_images=(self.max_live_images is not None
                          and images>self.max_live_images+len(self.demo_datas))
-        if too_many_images or input_reserve>_MAX_INPUT_RESERVE_TOKENS:
+        # Keep OpenAI requests below long-context pricing thresholds.
+        input_limit=min(_MAX_INPUT_RESERVE_TOKENS, 200000) if self.wire=='responses' else _MAX_INPUT_RESERVE_TOKENS
+        if too_many_images or input_reserve>input_limit:
             self.stop('input_reservation_limit')
-        # Real output across every call observed this session (zero-shot through
-        # medium effort) has stayed under 450 tokens; RESERVE_OUTPUT_TOKENS is a
-        # budget-planning assumption with a >1.5x margin over that, not the actual
-        # output-length cap sent to the API above (which stays generous so the
-        # model always has real headroom to think and respond).
+        # Reserve the full enforced output limit, including reasoning tokens.
         _,_,write_rate,out_rate=PRICING[self.model]
-        reserve=input_reserve*write_rate/1e6+_RESERVE_OUTPUT_TOKENS*out_rate/1e6
+        reserve=input_reserve*write_rate/1e6+output_cap*out_rate/1e6
         if self.used+reserve>self.total_budget or self.episode_used+reserve>self.episode_budget:
             self.stop('budget_reservation_limit')
         self.calls+=1
@@ -248,16 +248,18 @@ class BudgetTransport(httpx.BaseTransport):
         outgoing=httpx.Request('POST',request.url,headers=headers,content=content,extensions=request.extensions)
         ident=f'ep{self.episode:02d}_call{self.calls:02d}'
         self.record({'event':'request_started','call':self.calls,'reservation_usd':reserve,
-                     'input_token_reservation':input_reserve,'sha256':hashlib.sha256(content).hexdigest()})
+                     'input_token_reservation':input_reserve,'output_token_cap':output_cap,'images':images,'sha256':hashlib.sha256(content).hexdigest()})
         (self.output/f'{ident}_request.json').write_bytes(content)
         self.progress('waiting for the model...')
+        request_start=time.monotonic()
         for attempt in range(len(_SERVER_ERROR_BACKOFF_S)+1):
             try:
                 response=self.inner.handle_request(outgoing)
                 response.read()
             except Exception:
                 self.uncertain=True
-                self.record({'event':'usage_unknown','call':self.calls,'reserved_usd':reserve})
+                self.record({'event':'usage_unknown','call':self.calls,'reserved_usd':reserve,
+                             'latency_s':time.monotonic()-request_start})
                 self.progress('network error, usage unknown; stopping')
                 raise BudgetStop('network_error_usage_unknown') from None
             if response.status_code not in _SERVER_ERROR_STATUSES or attempt==len(_SERVER_ERROR_BACKOFF_S):
@@ -280,8 +282,13 @@ class BudgetTransport(httpx.BaseTransport):
         data={'event':'response','call':self.calls,'http_status':response.status_code,
               'request_id':request_id,
               'response_id':payload.get('id') if isinstance(payload,dict) else None,'usage':usage,
-              'api_error_code':error_code}
-        if usage and response.status_code==200:
+              'api_error_code':error_code,'latency_s':time.monotonic()-request_start,
+              'response_status':payload.get('status') if isinstance(payload,dict) else None,
+              'incomplete_details':payload.get('incomplete_details') if isinstance(payload,dict) else None}
+        valid_usage=isinstance(usage,dict) and all(
+            isinstance(usage.get(k),int) and not isinstance(usage.get(k),bool) and usage[k]>=0
+            for k in ('input_tokens','output_tokens'))
+        if valid_usage and response.status_code==200:
             in_rate,cached_rate,write_rate,out_rate=PRICING[self.model]
             out=int(usage['output_tokens'])
             if self.wire=='responses':

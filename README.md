@@ -30,10 +30,11 @@ caps, and optional few-shot demonstration storyboards.
 6. [Run one LIBERO-10 rollout](#run-one-libero-10-rollout)
 7. [Use a different LLM](#use-a-different-llm)
 8. [Paid runs with spending caps](#paid-runs-with-spending-caps)
-9. [Few-shot demonstrations](#few-shot-demonstrations)
-10. [Python API](#python-api)
-11. [Implementation notes](#implementation-notes)
-12. [Repository layout](#repository-layout)
+9. [Nine-configuration cost pilot and HTML report](#nine-configuration-cost-pilot-and-html-report)
+10. [Few-shot demonstrations](#few-shot-demonstrations)
+11. [Python API](#python-api)
+12. [Implementation notes](#implementation-notes)
+13. [Repository layout](#repository-layout)
 
 ## Installation
 
@@ -358,6 +359,52 @@ one, put its per-million-token prices in `PRICING` in
 `PROVIDER_WIRE` and `WIRE_ENDPOINTS`. The provider's own billing is the final
 word. The local numbers are conservative estimates.
 
+## Nine-configuration cost pilot and HTML report
+
+Compare GPT-6 Luna, Sol, and Astra at low, medium, and high reasoning on the
+same LIBERO task and initial state. Each short rollout executes up to three
+real LLM calls, with robot actions between observations. All nine runs share
+one conservative USD allowance; unknown API usage stops the entire pilot.
+
+```bash
+python scripts/run_cost_pilot.py \
+  --task-id 0 --init-state 0 --max-calls 3 \
+  --max-output-tokens 8192 --total-budget 3 \
+  --output outputs/my-cost-pilot --execute-paid-rollouts
+```
+
+The output directory must be new. The command sends paid requests using
+`OPENAI_API_KEY` from `.env` or the shell. It writes `report.html` after each
+configuration, plus `pilot.json`, `report_data.json`, `comparison.csv`, API
+usage records, simulator videos, trajectories, and framework logs. Open
+`report.html` directly in a browser: its interactive charts and videos are
+embedded and it works offline. To rebuild the report without API calls:
+
+```bash
+python scripts/run_cost_pilot.py --output outputs/my-cost-pilot --report-only
+```
+
+Each run records the repository commit, pinned Inspect Robots commit, complete
+embodiment prompt, and its SHA-256 fingerprint so prompt changes remain visible.
+The report shows measured API costs, conservative budget charges, latency,
+input/cached/reasoning/output tokens, output truncations, tool commands,
+conversation history, end-effector/gripper trajectories, videos, initial-state
+hash comparisons, and adjustable longer-episode cost projections. Costs use
+returned usage and the published rates recorded in the protocol; they exclude
+local compute and electricity. Provider billing remains authoritative.
+
+The transport reserves the full enforced output-token limit before each call.
+Its input-token reservation is conservative, not an exact provider tokenizer.
+OpenAI requests are restricted to a conservative short-context bound so the
+configured short-context prices apply. Budget reservations may stop a run
+before the measured bill reaches the allowance.
+
+This is one partial episode per configuration, not a success-rate benchmark.
+The policy knows the three-call limit, which can affect behavior. Later calls
+may have longer histories or different cache hits; linear cost projections
+are illustrative. Truncated or unknown-usage runs have no projection. Increasing
+`--max-output-tokens` gives reasoning more room but increases each reservation.
+
 ## Few-shot demonstrations
 
 By default runs are zero-shot. The model gets the instruction, the live
@@ -466,10 +513,12 @@ src/inspect_robots_libero/
   _worker.py       simulator subprocess: LIBERO env, action conversion, video
   tasks.py         libero_10 task, task table, seeds
   budget.py        BudgetTransport: spending caps, pricing, audit logging
+  pilot_report.py  standalone interactive HTML report generator
   demos.py         demonstration storyboards as a prompt message
   notes.py         optional per-task hints (not zero-shot)
 scripts/
   run_budgeted_rollouts.py   paid runs with caps
+  run_cost_pilot.py          nine-run GPT-6 cost comparison
   prepare_demonstrations.py  storyboards from LIBERO HDF5
   check_adapter.py           simulator-only check
   check_closed_loop.py       closed loop with a mocked LLM

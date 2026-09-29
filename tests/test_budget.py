@@ -40,6 +40,28 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(rows[-1]['request_id'],'req_mock')
         self.assertAlmostEqual(rows[-1]['estimated_usd'],.00332)
         self.assertNotIn('Authorization',json.dumps(rows))
+    def test_full_output_cap_reserved_before_send(self):
+        self.transport.begin_episode(0)
+        self.transport.total_budget=.10
+        with self.assertRaises(BudgetStop): self.request()
+        self.assertEqual(self.sent, [])
+
+    def test_configurable_output_cap(self):
+        self.transport.max_output_tokens=8192
+        self.transport.begin_episode(0)
+        self.request()
+        self.assertEqual(self.sent[0]['max_output_tokens'],8192)
+        rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
+        self.assertGreaterEqual(rows[0]['reservation_usd'],8192*50/1e6)
+
+    def test_missing_output_usage_keeps_reservation_and_stops(self):
+        self.transport.begin_episode(0)
+        self.transport.inner=httpx.MockTransport(lambda r:httpx.Response(200,json={'usage':{'input_tokens':100}}))
+        self.request()
+        self.assertTrue(self.transport.uncertain)
+        self.assertGreater(self.transport.used,0)
+        with self.assertRaises(BudgetStop): self.request()
+
     def test_attempt_cap(self):
         self.transport.begin_episode(0); self.transport.calls=20
         with self.assertRaises(BudgetStop): self.request()
