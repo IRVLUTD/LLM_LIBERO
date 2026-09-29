@@ -54,10 +54,10 @@ BASE_DOCS = (
     "object actually followed the lift in the next observation before assuming the grasp "
     "is secure.\n\n"
     "General manipulation guidance:\n"
-    "1. Avoid collisions: before any lateral move, lift above all nearby objects and "
-    "furniture. Do not sweep through or push objects unless the task requires it. Use "
-    "large moves in free space and small moves only in the last few centimeters near an "
-    "object.\n"
+    "1. Avoid collisions: before a lateral move that could intersect nearby objects or "
+"furniture, lift to a visibly safe clearance. Do not sweep through or push objects "
+"unless the task requires it. Use large moves in free space and small moves only in "
+"the last few centimeters near an object.\n"
     "2. Identify the target object carefully; similar-looking distractors may be present. "
     "Cross-check both camera views.\n"
     "3. A closed gripper does not mean a successful grasp. After closing, lift 3-5 cm and "
@@ -72,6 +72,8 @@ BASE_DOCS = (
     "starting the next step; do not assume success.\n"
     "7. Prefer fewer, purposeful moves over many tiny corrections; your call budget is "
     "limited."
+    "8. Declare success only when the latest observation clearly shows that the requested "
+"final state has been achieved."
 )
 
 
