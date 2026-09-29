@@ -26,13 +26,14 @@ caps, and optional few-shot demonstration storyboards.
 2. [API keys](#api-keys)
 3. [Check the installation](#check-the-installation)
 4. [LIBERO-10 tasks](#libero-10-tasks)
-5. [Run one LIBERO-10 rollout](#run-one-libero-10-rollout)
-6. [Use a different LLM](#use-a-different-llm)
-7. [Paid runs with spending caps](#paid-runs-with-spending-caps)
-8. [Few-shot demonstrations](#few-shot-demonstrations)
-9. [Python API](#python-api)
-10. [Implementation notes](#implementation-notes)
-11. [Troubleshooting](#troubleshooting)
+5. [What the model is told](#what-the-model-is-told)
+6. [Run one LIBERO-10 rollout](#run-one-libero-10-rollout)
+7. [Use a different LLM](#use-a-different-llm)
+8. [Paid runs with spending caps](#paid-runs-with-spending-caps)
+9. [Few-shot demonstrations](#few-shot-demonstrations)
+10. [Python API](#python-api)
+11. [Implementation notes](#implementation-notes)
+12. [Repository layout](#repository-layout)
 
 ## Installation
 
@@ -157,6 +158,69 @@ to `outputs/checks/`.
 Each task has 50 fixed initial states (0 to 49). Scene `i` loads initial state
 `i` with LIBERO env seed `142 + i`, lets the scene settle for 10 no-op steps,
 then hands control to the policy. The horizon is 900 steps (45 s at 20 Hz).
+
+## What the model is told
+
+By default the model gets no task-specific help. Its system prompt has two
+parts:
+
+1. The upstream `agent` policy's generic prompt (`_SYSTEM_TEMPLATE` in
+   `inspect_robots_agent/policy.py`): one tool call per turn, a `note` with
+   every move, call `done` or `give_up`, and the LLM call budget.
+2. `Embodiment notes:` followed by `BASE_DOCS` from
+   `src/inspect_robots_libero/embodiment.py`, quoted in full below.
+
+`BASE_DOCS` only covers how this robot works and general manipulation
+practice that applies to every task, such as "avoid collisions". It never
+names an object, a task, or a strategy for one task. The user message then
+gives the instruction (`Goal: ...`), and each observation gives the robot
+state and the two camera images.
+
+```text
+Single Panda arm. move_to uses world-frame x,y,z in meters and rot6d
+orientation (first two rotation-matrix columns). z points up. Gripper 0=open,
+1=close. The gripper is open/close only: any value above 0.5 keeps closing and
+any value below 0.5 keeps opening, so intermediate values do not give a
+partial opening. The gripper entry of eef_state is the current gripper
+command, not the finger position: it reads 1 while closed on an object even
+though the fingers are stopped apart. Measured finger positions are in
+gripper_qpos (meters, about +/-0.04 each when fully open, near 0 when closed
+on nothing); fingers stopped clearly apart after closing indicate something is
+between them. Omitting gripper from a move_to call keeps the current command.
+Keep orientation unchanged unless necessary. Images are upright agentview and
+wrist camera views. Only robot proprioception and RGB are available; no object
+coordinates. Intermediate target arrival must be checked from the next
+observation. Verify the object actually followed the lift in the next
+observation before assuming the grasp is secure.
+
+General manipulation guidance:
+1. Avoid collisions: before any lateral move, lift above all nearby objects
+and furniture. Do not sweep through or push objects unless the task requires
+it. Use large moves in free space and small moves only in the last few
+centimeters near an object.
+2. Identify the target object carefully; similar-looking distractors may be
+present. Cross-check both camera views.
+3. A closed gripper does not mean a successful grasp. After closing, lift 3-5
+cm and confirm in both cameras that the object rose with the gripper.
+4. Handle objects the way a person would: grasp a stable, graspable part
+without pushing or tipping the object, keep it in the same orientation
+(usually upright) from grasp to placement, and lower it close to the support
+surface before releasing.
+5. If the same approach fails twice, change it (grasp point, approach
+direction, or a small adjustment); do not repeat the same motion.
+6. After each move, confirm from the next observation that it succeeded before
+starting the next step; do not assume success.
+7. Prefer fewer, purposeful moves over many tiny corrections; your call budget
+is limited.
+```
+
+`tests/test_readme.py` fails if this block and `BASE_DOCS` drift apart.
+Runs made before commit `fab7acb` used an earlier wording of the gripper
+sentences in the first paragraph (see `git log -p src/inspect_robots_libero/embodiment.py`).
+
+Nothing else is added unless you ask for it. Task notes and demonstration
+storyboards are off by default (see [Few-shot demonstrations](#few-shot-demonstrations)),
+and `protocol.json` records `"zero_shot": true` when neither was used.
 
 ## Run one LIBERO-10 rollout
 
@@ -373,19 +437,23 @@ Like `inspect-robots run`, this has no dollar limit. Use
 
 - Action space: 10-D absolute end-effector pose in the world frame,
   `x, y, z` (m) plus rot6d (the first two columns of the rotation matrix) plus a
-  gripper command in [0, 1] (0 open, 1 closed). The upstream agent's Cartesian
+  gripper command in [0, 1] (0 open, 1 closed). robosuite's Panda gripper
+  follows only the sign of `2 * gripper - 1`, so the command acts as
+  open/close, not as a finger position. The upstream agent's Cartesian
   tools only support rot6d or no rotation, not axis-angle. The worker
   orthonormalises rot6d, converts it to axis-angle, and drives LIBERO's OSC
   controller with `use_delta=False`.
 - Observations: `agentview` (flipped on both axes so it is upright, as in the
   standard LIBERO client) and `wrist`, both 256x256. State `eef_state` is the
-  controller's own `ee_pos` plus `ee_ori_mat` in rot6d plus a gripper closure
-  estimate, so observed and commanded poses share one frame. `robot0_eef_quat`
-  uses a different reference frame, so it is not used. `gripper_qpos` is the
-  raw finger positions. Object poses and the success predicate are never
-  shown to the model.
-- Operating notes for the model (frame conventions, gripper behaviour) are in
-  `EmbodimentInfo.docs`. The agent policy appends them to its system prompt.
+  controller's own `ee_pos` plus `ee_ori_mat` in rot6d plus the gripper's
+  current command state, so observed and commanded poses share one frame.
+  The agent interpolates each `move_to` from `eef_state`; reporting measured
+  finger closure there instead would start a grasp-holding move below 0.5 and
+  open the hand. `robot0_eef_quat` uses a different reference frame, so it is
+  not used. `gripper_qpos` is the raw finger positions. Object poses and the
+  success predicate are never shown to the model.
+- Operating notes for the model are `BASE_DOCS`, passed as
+  `EmbodimentInfo.docs`. See [What the model is told](#what-the-model-is-told).
 - Success: `success_at_end`, from LIBERO's `check_success()`. The episode
   also ends as soon as the predicate becomes true.
 
