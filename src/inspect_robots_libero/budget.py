@@ -23,12 +23,13 @@ from PIL import Image
 class BudgetStop(RuntimeError):
     pass
 
-# Hard backstop on estimated per-request size, independent of dollar cost --
-# protects against a single request becoming pathologically bloated. Real
-# model context windows are far larger (gpt-6-luna: 1.05M tokens per
-# OpenAI's 2026-09-22 announcement), and this conservative estimate already
-# overshoots real tokens substantially, so raising it is safe.
+# Hard backstop on the conservative request-size estimate. This estimator counts
+# serialized bytes as tokens and therefore substantially overstates provider usage;
+# the full-episode pilot measured about 20.6k real input tokens when it crossed the
+# former 200k local estimate. Keep a 600k estimate ceiling while independently
+# stopping if reported provider usage crosses the short-context pricing threshold.
 _MAX_INPUT_RESERVE_TOKENS=600000
+_OPENAI_SHORT_CONTEXT_TOKENS=200000
 
 # Which real endpoint + request shape a wire uses. 'responses' is OpenAI's
 # Responses API; 'messages' is Anthropic's native Messages API -- different
@@ -42,9 +43,9 @@ WIRE_ENDPOINTS={
 PROVIDER_WIRE={'openai':'responses','anthropic':'messages'}
 # Needed for thinking.block_binding (see handle_request).
 _THINKING_BINDING_BETA='thinking-binding-controls-2026-08-01'
-# Transient server-side failures (overload, gateway errors): retried here with these
-# waits before the request counts as failed. Providers do not bill them.
-_SERVER_ERROR_STATUSES=frozenset({500,502,503,504,529})
+# Transient provider responses (rate limit, overload, gateway errors): retried here
+# before the request counts as failed. Providers do not bill these responses.
+_SERVER_ERROR_STATUSES=frozenset({408,409,429,500,502,503,504,520,529})
 _SERVER_ERROR_BACKOFF_S=(15,30,60,120)
 
 # Per-1M-token USD rates: (regular_input, cached_input, cache_write, output),
@@ -58,6 +59,7 @@ PRICING={
     'openai/gpt-6-astra':(10.,1.,12.5,50.),
     'openai/gpt-6-luna':(0.10,0.01,0.125,0.50),
     'openai/gpt-6-sol':(2.,0.2,2.5,10.),
+    'openai/gpt-6.1-sol':(2.,0.1,2.5,10.),
     'anthropic/claude-opus-5-5':(4.,0.2,5.,20.),
 }
 
@@ -227,7 +229,7 @@ class BudgetTransport(httpx.BaseTransport):
         too_many_images=(self.max_live_images is not None
                          and images>self.max_live_images+len(self.demo_datas))
         # Keep OpenAI requests below long-context pricing thresholds.
-        input_limit=min(_MAX_INPUT_RESERVE_TOKENS, 200000) if self.wire=='responses' else _MAX_INPUT_RESERVE_TOKENS
+        input_limit=_MAX_INPUT_RESERVE_TOKENS
         if too_many_images or input_reserve>input_limit:
             self.stop('input_reservation_limit')
         # Reserve the full enforced output limit, including reasoning tokens.
@@ -267,7 +269,7 @@ class BudgetTransport(httpx.BaseTransport):
             wait=_SERVER_ERROR_BACKOFF_S[attempt]
             self.record({'event':'server_error_retry','call':self.calls,
                          'http_status':response.status_code,'wait_s':wait})
-            self.progress(f'HTTP {response.status_code} (server overloaded); retrying in {wait}s')
+            self.progress(f'HTTP {response.status_code} (transient provider response); retrying in {wait}s')
             time.sleep(wait)
         payload=None
         try:
@@ -321,8 +323,11 @@ class BudgetTransport(httpx.BaseTransport):
             if total_in>input_reserve or out>output_cap:
                 self.uncertain=True
                 data['reservation_exceeded']=True
+            if self.wire=='responses' and total_in>_OPENAI_SHORT_CONTEXT_TOKENS:
+                self.uncertain=True
+                data['short_context_pricing_exceeded']=True
         elif response.status_code in _SERVER_ERROR_STATUSES:
-            # Server-side failures carry an error body and are not billed: release the
+            # These transient failures carry an error body and are not billed: release the
             # reservation so this episode fails alone instead of blocking the whole run.
             self.used-=reserve
             self.episode_used-=reserve

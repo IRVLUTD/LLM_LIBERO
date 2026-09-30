@@ -71,9 +71,9 @@ BASE_DOCS = (
     "6. After each move, confirm from the next observation that it succeeded before "
     "starting the next step; do not assume success.\n"
     "7. Prefer fewer, purposeful moves over many tiny corrections; your call budget is "
-    "limited."
+    "limited.\n"
     "8. Declare success only when the latest observation clearly shows that the requested "
-"final state has been achieved."
+    "final state has been achieved."
 )
 
 
