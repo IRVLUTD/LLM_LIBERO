@@ -10,6 +10,8 @@ vendor/
 # Rollout videos, eval logs, API audit files.
 outputs/
 logs/
+budget.html
+.wrangler/
 
 __pycache__/
 *.py[cod]

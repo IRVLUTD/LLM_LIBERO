@@ -30,7 +30,7 @@ caps, and optional few-shot demonstration storyboards.
 6. [Run one LIBERO-10 rollout](#run-one-libero-10-rollout)
 7. [Use a different LLM](#use-a-different-llm)
 8. [Paid runs with spending caps](#paid-runs-with-spending-caps)
-9. [Nine-configuration cost pilot and HTML report](#nine-configuration-cost-pilot-and-html-report)
+9. [Cost pilot and HTML report](#cost-pilot-and-html-report)
 10. [Few-shot demonstrations](#few-shot-demonstrations)
 11. [Python API](#python-api)
 12. [Implementation notes](#implementation-notes)
@@ -47,7 +47,7 @@ Python 3.12 environment.
 Inspect Robots is installed from source at a pinned commit (`upstream_commit.txt`):
 
 ```bash
-git clone git@github.com:IRVLUTD/LLM_LIBERO.git
+git clone https://github.com/IRVLUTD/LLM_LIBERO.git
 cd LLM_LIBERO
 git clone https://github.com/robocurve/inspect-robots.git vendor/inspect-robots
 git -C vendor/inspect-robots checkout "$(cat upstream_commit.txt)"
@@ -195,24 +195,26 @@ observation. Verify the object actually followed the lift in the next
 observation before assuming the grasp is secure.
 
 General manipulation guidance:
-1. Avoid collisions: before any lateral move, lift above all nearby objects
-and furniture. Do not sweep through or push objects unless the task requires
-it. Use large moves in free space and small moves only in the last few
-centimeters near an object.
+1. Avoid collisions: before a lateral move that could intersect nearby objects
+   or furniture, lift to a visibly safe clearance. Do not sweep through or
+   push objects unless the task requires it. Use large moves in free space and
+   small moves only in the last few centimeters near an object.
 2. Identify the target object carefully; similar-looking distractors may be
-present. Cross-check both camera views.
+   present. Cross-check both camera views.
 3. A closed gripper does not mean a successful grasp. After closing, lift 3-5
-cm and confirm in both cameras that the object rose with the gripper.
+   cm and confirm in both cameras that the object rose with the gripper.
 4. Handle objects the way a person would: grasp a stable, graspable part
-without pushing or tipping the object, keep it in the same orientation
-(usually upright) from grasp to placement, and lower it close to the support
-surface before releasing.
+   without pushing or tipping the object, keep it in the same orientation
+   (usually upright) from grasp to placement, and lower it close to the
+   support surface before releasing.
 5. If the same approach fails twice, change it (grasp point, approach
-direction, or a small adjustment); do not repeat the same motion.
+   direction, or a small adjustment); do not repeat the same motion.
 6. After each move, confirm from the next observation that it succeeded before
-starting the next step; do not assume success.
+   starting the next step; do not assume success.
 7. Prefer fewer, purposeful moves over many tiny corrections; your call budget
-is limited.
+   is limited.
+8. Declare success only when the latest observation clearly shows that the
+   requested final state has been achieved.
 ```
 
 `tests/test_readme.py` fails if this block and `BASE_DOCS` drift apart.
@@ -305,7 +307,7 @@ inspect-robots run --task libero_10 -T task_id=0 --embodiment libero \
 ```
 
 This repo was tested with `openai/gpt-6-astra`, `openai/gpt-6-luna`,
-`openai/gpt-6-sol` and `anthropic/claude-opus-5-5`.
+`openai/gpt-6-sol`, `openai/gpt-6.1-sol`, and `anthropic/claude-opus-5-5`.
 
 ## Paid runs with spending caps
 
@@ -353,25 +355,36 @@ outputs/task02_opus_zeroshot/
 | `budget_charge_usd`, `total_budget_charge_usd` | What the budget caps count. All input is charged at the cache-write rate, so this is higher than the real spend, often several times higher when most input is cached |
 
 Only models with a price row are accepted: `openai/gpt-6-astra`,
-`openai/gpt-6-luna`, `openai/gpt-6-sol`, `anthropic/claude-opus-5-5`. To add
+`openai/gpt-6-luna`, `openai/gpt-6-sol`, `openai/gpt-6.1-sol`,
+`anthropic/claude-opus-5-5`. To add
 one, put its per-million-token prices in `PRICING` in
 `src/inspect_robots_libero/budget.py`. A new provider also needs entries in
 `PROVIDER_WIRE` and `WIRE_ENDPOINTS`. The provider's own billing is the final
 word. The local numbers are conservative estimates.
 
-## Nine-configuration cost pilot and HTML report
+## Cost pilot and HTML report
 
 Compare GPT-6 Luna, Sol, and Astra at low, medium, and high reasoning on the
-same LIBERO task and initial state. Each short rollout executes up to three
-real LLM calls, with robot actions between observations. All nine runs share
-one conservative USD allowance; unknown API usage stops the entire pilot.
+same LIBERO task and initial state. The default sweep has nine configurations;
+GPT-6.1 Sol is also available through `--config`. Each configuration gets a full episode that
+runs until task success, model termination, the simulator horizon, the high
+emergency call ceiling, or its own dollar limit. Each run has a separate cap
+inside a sweep-wide cap. Unknown API usage stops the entire pilot.
 
 ```bash
 python scripts/run_cost_pilot.py \
-  --task-id 0 --init-state 0 --max-calls 3 \
-  --max-output-tokens 8192 --total-budget 3 \
+  --task-id 0 --init-state 0 --max-calls 100 --max-steps 900 \
+  --max-output-tokens 8192 --per-run-budget 5 --total-budget 45 \
   --output outputs/my-cost-pilot --execute-paid-rollouts
 ```
+
+Use repeated `--config` flags to run a subset in a chosen order. Available IDs
+include `luna_high`, `sol_low`, `astra_medium`, and `gpt_6_1_sol_high`.
+If selecting all 12 configurations with $5 per run, set `--total-budget 60`.
+
+[View the published 12-configuration cost report](https://llm-libero-budget.pages.dev/).
+Its GPT-6.1 Sol high attempt was interrupted after 27 calls, so its cost is
+partial. The raw run files stay local and are excluded from Git.
 
 The output directory must be new. The command sends paid requests using
 `OPENAI_API_KEY` from `.env` or the shell. It writes `report.html` after each
@@ -399,10 +412,11 @@ OpenAI requests are restricted to a conservative short-context bound so the
 configured short-context prices apply. Budget reservations may stop a run
 before the measured bill reaches the allowance.
 
-This is one partial episode per configuration, not a success-rate benchmark.
-The policy knows the three-call limit, which can affect behavior. Later calls
-may have longer histories or different cache hits; linear cost projections
-are illustrative. Truncated or unknown-usage runs have no projection. Increasing
+This is one full episode per configuration, not a success-rate benchmark. The
+policy knows the high emergency call ceiling, but normal runs end on task
+success, model termination, the simulator horizon, or its per-run dollar limit. Later
+calls may have longer histories or different cache hits; linear cost
+projections are illustrative. Truncated or unknown-usage runs have no projection. Increasing
 `--max-output-tokens` gives reasoning more room but increases each reservation.
 
 ## Few-shot demonstrations
