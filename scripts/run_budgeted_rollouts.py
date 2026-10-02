@@ -61,6 +61,8 @@ def main() -> None:
     parser.add_argument("--image-horizon", type=int, default=2,
                         help="how many past observations keep their images")
     parser.add_argument("--max-steps", type=int, default=900)
+    parser.add_argument("--max-output-tokens", type=int, default=2048,
+                        help="output-token cap per OpenAI request, reasoning included")
     parser.add_argument("--demo-manifest", type=Path,
                         help="storyboards from scripts/prepare_demonstrations.py (few-shot)")
     parser.add_argument("--task-notes", action="store_true",
@@ -89,7 +91,7 @@ def main() -> None:
     transport = BudgetTransport(
         output / "api", args.total_budget, args.episode_budget, task_id=args.task_id,
         demo_manifest=args.demo_manifest, max_calls=args.max_calls, model=args.model,
-        image_horizon=args.image_horizon,
+        image_horizon=args.image_horizon, max_output_tokens=args.max_output_tokens,
     )
     full_task = libero_10_task(args.task_id, num_scenes=args.episodes, start=args.start,
                                max_steps=args.max_steps)
@@ -106,6 +108,7 @@ def main() -> None:
         "max_api_attempts_per_episode": args.max_calls,
         "reasoning_effort": args.effort,
         "image_horizon": args.image_horizon,
+        "max_output_tokens": args.max_output_tokens,
         "total_budget": args.total_budget,
         "episode_budget": args.episode_budget,
         "zero_shot": args.demo_manifest is None and not args.task_notes,
