@@ -7,6 +7,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import upload_experiment_bundle as bundle
 
 
+def test_merge_concatenates_and_deduplicates_exact_episode():
+    old = {'version': 1, 'campaign': 'old', 'episodes': [
+        {'model': 'a', 'effort': 'low', 'task_id': 0, 'init_state': 0,
+         'run': 'one', 'episode': 0, 'has_result': True, 'success': False}]}
+    new = {'version': 1, 'campaign': 'new', 'created_at': 'now', 'episodes': [
+        {'model': 'a', 'effort': 'low', 'task_id': 0, 'init_state': 0,
+         'run': 'one', 'episode': 0, 'has_result': True, 'success': True},
+        {'model': 'b', 'effort': 'medium', 'task_id': 1, 'init_state': 2,
+         'run': 'two', 'episode': 0, 'has_result': True, 'success': False}]}
+    merged = bundle.merge_results(old, new)
+    assert len(merged['episodes']) == 2
+    assert merged['episodes'][0]['success'] is True
+    assert merged['totals']['successes'] == 1
+    assert merged['merged_sources'] == ['new', 'old']
+
+
 def test_numbers_only_and_pending(tmp_path):
     run = tmp_path / 'run'
     (run / 'api').mkdir(parents=True)

@@ -26,6 +26,12 @@ python scripts/upload_rollout_videos.py --model all --reasoning all --task all -
 python scripts/upload_rollout_videos.py --credentials outputs/drive_auth/credentials.json --public
 ```
 
+Each collaborator should keep their own OAuth credentials and token. To add a
+partner's videos to the same folder, give them access to the folder and have
+them run the fetch command on their campaign, followed by the upload command
+with the shared `--folder-id`. Identical videos are skipped; new rollout keys
+are added without deleting other collaborators' files.
+
 The default destination is folder `1D6vn9HiG9V81ROdV57m7zy8tOsDLL84M`. Sign in as an account that can add files there. OAuth prints a login URL; open it in a browser on the same machine so the localhost callback can complete. On a remote machine, forward the callback port printed in the login URL. The script requests full Drive scope to access your existing folder by ID without a Google Picker grant; see Google's [scope documentation](https://developers.google.com/workspace/drive/api/guides/api-specific-auth). The code uploads only selected videos to the destination folder. Credentials and tokens stay under ignored `outputs/`.
 
 `--public` grants anyone with the link reader access to selected videos. Omit it to retain existing/inherited sharing. Public website visitors need viewer access; an organization's sharing policy may prevent public access. See Google's [sharing documentation](https://developers.google.com/workspace/drive/api/guides/manage-sharing).

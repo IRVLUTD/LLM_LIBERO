@@ -7,6 +7,9 @@ The script exports **one JSON file** with the current viewer's results across ev
 python scripts/upload_experiment_bundle.py --export-only
 # Export and upload:
 python scripts/upload_experiment_bundle.py
+# Merge into a shared results file from another machine:
+python scripts/upload_experiment_bundle.py --visualization --file-id DRIVE_FILE_ID \
+  --credentials outputs/drive_auth/credentials.json
 ```
 
 Default source: `/metadisk/may/llm_libero_experiments/libero_experiments_20260930`.
@@ -15,7 +18,13 @@ No videos, images, transcripts, prompts, raw API responses, viewer HTML, or arch
 
 Uses the same Drive folder and OAuth token as the video uploader. Install `google-api-python-client` and `google-auth-oauthlib` if needed. On first login add `--credentials outputs/drive_auth/credentials.json`. Options: `--source`, `--output`, `--folder-id`, `--token`, `--dry-run`, and `--export-only`.
 
-Rerunning updates the same campaign's results file in Drive, preserving its file ID. The script prints the Drive link and saves a receipt in `outputs/experiment_results.drive.json`. Sharing follows the destination folder.
+Before replacing the Drive file, the uploader downloads its existing JSON and
+merges the new episodes into it. Existing episodes are retained; an exact repeat
+of the same model/effort/task/state/run/episode is updated instead of duplicated.
+Use `--file-id DRIVE_FILE_ID` when uploading from another machine so both people
+merge into the same file. Without it, the uploader looks for the campaign's
+prior upload or `experiment_results.json` in the selected folder. The script
+prints the Drive link and writes `outputs/experiment_results.drive.json`.
 
 In another repo, download the JSON using the printed Drive link and load `episodes` to display individual results, `by_model_task` for comparisons, and `totals` for headline counts. Automated downloads use the printed file ID with `https://www.googleapis.com/drive/v3/files/FILE_ID?alt=media` and an OAuth bearer token with file access.
 
