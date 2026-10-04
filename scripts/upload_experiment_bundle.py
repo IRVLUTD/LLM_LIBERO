@@ -5,6 +5,7 @@ import argparse
 from collections import defaultdict
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -105,12 +106,34 @@ def export_results(source, visualization_data=False, video_index=None):
             'episodes': episodes}
 
 
-def upload(archive, source, args):
+def merge_results(existing, current):
+    """Append new episode records while making repeated uploads idempotent."""
+    episodes = {}
+    for row in [*existing.get('episodes', []), *current.get('episodes', [])]:
+        key = tuple(row.get(field) for field in
+                    ('model', 'effort', 'task_id', 'init_state', 'run', 'episode'))
+        episodes[key] = row
+    rows = list(episodes.values())
+    groups = defaultdict(list)
+    for row in rows:
+        groups[(row['model'], row['effort'], row['task_id'])].append(row)
+    merged = dict(current)
+    merged['episodes'] = rows
+    merged['totals'] = aggregate(rows)
+    merged['by_model_task'] = [
+        dict(model=model, effort=effort, task_id=task, **aggregate(group))
+        for (model, effort, task), group in sorted(groups.items())]
+    merged['merged_sources'] = sorted(set(existing.get('merged_sources', [existing.get('campaign')]) +
+                                          current.get('merged_sources', [current.get('campaign')])) - {None})
+    return merged
+
+
+def upload(archive, source, current, args):
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
+    from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
     scopes = ['https://www.googleapis.com/auth/drive']
     credentials = Credentials.from_authorized_user_file(str(args.token), scopes) if args.token.exists() else None
     if not credentials or not credentials.valid:
@@ -129,22 +152,56 @@ def upload(archive, source, args):
     if folder['mimeType'] != 'application/vnd.google-apps.folder' or not folder.get('capabilities', {}).get('canAddChildren'):
         raise ValueError('Destination must be a folder you can upload into')
     key = hashlib.sha256(str(source.resolve()).encode()).hexdigest()
-    query = f"'{args.folder_id}' in parents and trashed = false and appProperties has {{ key='experimentResults' and value='{key}' }}"
-    found = service.files().list(q=query, fields='files(id)', supportsAllDrives=True, includeItemsFromAllDrives=True).execute()['files']
-    if len(found) > 1:
-        raise ValueError('Multiple results exports match this campaign; resolve duplicates first')
+    if args.file_id:
+        found = [service.files().get(fileId=args.file_id, fields='id,name,parents',
+                                     supportsAllDrives=True).execute()]
+        if args.folder_id not in found[0].get('parents', []):
+            raise ValueError('--file-id is not inside the selected Drive folder')
+    else:
+        queries = [
+            f"'{args.folder_id}' in parents and trashed = false and appProperties has {{ key='experimentResults' and value='{key}' }}",
+            f"'{args.folder_id}' in parents and trashed = false and name = '{archive.name}'",
+        ]
+        by_id = {}
+        for query in queries:
+            files = service.files().list(q=query, fields='files(id,name,parents)', supportsAllDrives=True,
+                                         includeItemsFromAllDrives=True).execute()['files']
+            by_id.update((item['id'], item) for item in files)
+        found = list(by_id.values())
+        if len(found) > 1:
+            raise ValueError('Multiple result files match; select one with --file-id')
+    if found:
+        stream = io.BytesIO()
+        downloader = MediaIoBaseDownload(
+            stream, service.files().get_media(fileId=found[0]['id'], supportsAllDrives=True))
+        done = False
+        while not done:
+            _, done = downloader.next_chunk(num_retries=5)
+        existing = json.loads(stream.getvalue())
+        if existing.get('version') != 1 or not isinstance(existing.get('episodes'), list):
+            raise ValueError('Existing Drive file is not a supported experiment results export')
+        current = merge_results(existing, current)
+        archive.write_text(json.dumps(current, indent=2, allow_nan=False) + '\n')
     media = MediaFileUpload(str(archive), mimetype='application/json', chunksize=16 * 1024**2, resumable=True)
     if found:
-        request = service.files().update(fileId=found[0]['id'], body={'name': archive.name}, media_body=media, fields='id,webViewLink', supportsAllDrives=True)
+        request = service.files().update(fileId=found[0]['id'], body={'name': archive.name},
+                                         media_body=media, fields='id,webViewLink', supportsAllDrives=True)
     else:
-        request = service.files().create(body={'name': archive.name, 'parents': [args.folder_id], 'appProperties': {'experimentResults': key}}, media_body=media, fields='id,webViewLink', supportsAllDrives=True)
+        request = service.files().create(
+            body={'name': archive.name, 'parents': [args.folder_id],
+                  'appProperties': {'experimentResults': key}},
+            media_body=media, fields='id,webViewLink', supportsAllDrives=True)
     response = None
     while response is None:
         progress, response = request.next_chunk(num_retries=5)
         if progress:
             print(f'Uploaded {progress.progress():.1%}', flush=True)
     file_id = response['id']
-    receipt = {'file_id': file_id, 'view_url': response.get('webViewLink', f'https://drive.google.com/file/d/{file_id}/view'), 'download_url': f'https://www.googleapis.com/drive/v3/files/{file_id}?alt=media', 'export': str(archive), 'size_bytes': archive.stat().st_size}
+    receipt = {'file_id': file_id, 'drive_name': archive.name,
+               'view_url': response.get('webViewLink', f'https://drive.google.com/file/d/{file_id}/view'),
+               'download_url': f'https://www.googleapis.com/drive/v3/files/{file_id}?alt=media',
+               'export': str(archive), 'created_at': current['created_at'],
+               'episodes': len(current['episodes']), 'size_bytes': archive.stat().st_size}
     archive.with_suffix('.drive.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps(receipt, indent=2))
 
@@ -153,6 +210,7 @@ def main():
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE)
     parser.add_argument('--output', type=Path, default=Path('outputs/experiment_results.json'))
     parser.add_argument('--folder-id', default=DEFAULT_FOLDER)
+    parser.add_argument('--file-id', help='Existing results file to merge into; recommended for uploads from another machine')
     parser.add_argument('--token', type=Path, default=Path('outputs/drive_auth/token.json'))
     parser.add_argument('--credentials', type=Path)
     parser.add_argument('--visualization', action='store_true', help='Include response markers, tool targets, and interpolated action paths')
@@ -176,7 +234,7 @@ def main():
         temporary.replace(args.output)
         print(f'Results: {args.output}', flush=True)
         if not args.export_only:
-            upload(args.output, args.source, args)
+            upload(args.output, args.source, data, args)
     except (ValueError, ImportError) as exc:
         parser.error(str(exc))
 
