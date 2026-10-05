@@ -133,6 +133,16 @@ class AnthropicBudgetTests(unittest.TestCase):
         beta,body=self.sent[-1]
         self.assertEqual(body['thinking']['block_binding'],{'prefix_mismatch_behavior':'drop_block'})
         self.assertEqual(beta,'fast-mode-2026-02-01,'+budget._THINKING_BINDING_BETA)
+    def test_thinking_signatures_not_counted_as_input(self):
+        self.transport.begin_episode(0)
+        thinking={'type':'thinking','thinking':'','signature':'x'*700000}
+        self.client.post('https://api.anthropic.com/v1/messages',json={
+            'model':'claude-opus-5-5','max_tokens':1000,'tools':[],
+            'messages':[{'role':'assistant','content':[thinking]}]})
+        _,body=self.sent[-1]
+        self.assertEqual(len(body['messages'][0]['content'][0]['signature']),700000)
+        rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
+        self.assertLess(rows[0]['input_token_reservation'],10000)
     def test_openai_endpoint_rejected(self):
         self.transport.begin_episode(0)
         with self.assertRaises(BudgetStop):

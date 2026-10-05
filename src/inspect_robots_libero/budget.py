@@ -172,6 +172,10 @@ class BudgetTransport(httpx.BaseTransport):
                     # Anthropic bills about w*h/750 tokens per image; reserve 2x.
                     image_tokens+=2*(-(-im.size[0]*im.size[1]//750))
                     return {'type':'image','source':{'type':'base64','media_type':'image/png','data':'[image]'}}
+                if self.wire=='messages' and value.get('type')=='thinking' and 'signature' in value:
+                    # The signature is an opaque integrity blob, not billed input. Counting its
+                    # bytes once stopped a 26k-token Opus request at the 600k estimate ceiling.
+                    return {k:walk(v) for k,v in value.items() if k!='signature'}
                 return {k:walk(v) for k,v in value.items()}
             if isinstance(value,list):
                 return [walk(v) for v in value]
