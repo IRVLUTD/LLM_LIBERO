@@ -61,6 +61,8 @@ PRICING={
     'openai/gpt-6-sol':(2.,0.2,2.5,10.),
     'openai/gpt-6.1-sol':(2.,0.1,2.5,10.),
     'anthropic/claude-opus-5-5':(4.,0.2,5.,20.),
+    # $5/$25 published; cache read 0.1x and 5-minute cache write 1.25x of input (2026-10-11).
+    'anthropic/claude-opus-5':(5.,0.5,6.25,25.),
 }
 
 
@@ -143,8 +145,9 @@ class BudgetTransport(httpx.BaseTransport):
     def _estimate(self, body):
         images=0
         image_tokens=0
+        signature_tokens=0
         def walk(value):
-            nonlocal images, image_tokens
+            nonlocal images, image_tokens, signature_tokens
             if isinstance(value,dict):
                 if self.wire=='responses' and value.get('type')=='input_image':
                     url=value.get('image_url','')
@@ -173,15 +176,18 @@ class BudgetTransport(httpx.BaseTransport):
                     image_tokens+=2*(-(-im.size[0]*im.size[1]//750))
                     return {'type':'image','source':{'type':'base64','media_type':'image/png','data':'[image]'}}
                 if self.wire=='messages' and value.get('type')=='thinking' and 'signature' in value:
-                    # The signature is an opaque integrity blob, not billed input. Counting its
-                    # bytes once stopped a 26k-token Opus request at the 600k estimate ceiling.
+                    # The signature carries the encrypted thinking. Opus 5 bills replayed thinking
+                    # as input (about 4 signature bytes per thinking token); Opus 5.5 does not. Counting
+                    # every byte stopped a 26k-token Opus 5.5 request at the 600k ceiling, and counting
+                    # none undercut real Opus 5 input, so reserve half a token per signature byte.
+                    signature_tokens+=len(value['signature'])//2
                     return {k:walk(v) for k,v in value.items() if k!='signature'}
                 return {k:walk(v) for k,v in value.items()}
             if isinstance(value,list):
                 return [walk(v) for v in value]
             return value
         text=walk(body)
-        return text,images,image_tokens
+        return text,images,image_tokens+signature_tokens
 
     def handle_request(self, request):
         if self.uncertain:
