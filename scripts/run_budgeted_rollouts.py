@@ -24,6 +24,7 @@ import os
 import sys
 from pathlib import Path
 
+import httpx
 from inspect_robots import eval as evaluate
 from inspect_robots._dotenv import read_dotenv
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
@@ -63,6 +64,8 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=900)
     parser.add_argument("--max-output-tokens", type=int, default=2048,
                         help="output-token cap per OpenAI request, reasoning included")
+    parser.add_argument("--request-timeout", type=float,
+                        help="seconds to wait for one LLM response (upstream default for Claude: 128)")
     parser.add_argument("--demo-manifest", type=Path,
                         help="storyboards from scripts/prepare_demonstrations.py (few-shot)")
     parser.add_argument("--task-notes", action="store_true",
@@ -109,6 +112,7 @@ def main() -> None:
         "reasoning_effort": args.effort,
         "image_horizon": args.image_horizon,
         "max_output_tokens": args.max_output_tokens,
+        "request_timeout_s": args.request_timeout,
         "total_budget": args.total_budget,
         "episode_budget": args.episode_budget,
         "zero_shot": args.demo_manifest is None and not args.task_notes,
@@ -149,6 +153,10 @@ def main() -> None:
                 image_horizon=args.image_horizon, prior_learnings=None,
                 transport=transport, wire_capture=True,
             )
+            if args.request_timeout:
+                # Only the wait changes; the request itself is identical. A response that takes
+                # longer than the timeout is otherwise reported as a network error and stops the task.
+                policy._client._http.timeout = httpx.Timeout(args.request_timeout, connect=10.0)
             task = Task(name=full_task.name, scenes=[scene], scorer=full_task.scorer,
                         max_steps=args.max_steps)
             # The CLI's default guardrails (bounds clamp + per-step delta limit);
