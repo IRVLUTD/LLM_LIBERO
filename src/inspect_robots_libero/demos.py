@@ -9,8 +9,43 @@ import json
 from pathlib import Path
 
 
+def _image_block(b64, wire):
+    if wire=='responses':
+        return {'type':'input_image','image_url':'data:image/png;base64,'+b64,'detail':'high'}
+    return {'type':'image','source':{'type':'base64','media_type':'image/png','data':b64}}
+
+
+def _load_keyframes(manifest, task_id, wire):
+    """Hand-picked key frames: an intro, then each image after its own caption, then an outro."""
+    if manifest['task_id']!=task_id or not manifest['frames']:
+        raise ValueError('Expected at least one key frame of the requested task')
+    text_type='input_text' if wire=='responses' else 'text'
+    content=[{'type':text_type,'text':manifest['intro']}]
+    datas=[]
+    for frame in manifest['frames']:
+        content.append({'type':text_type,'text':frame['caption']})
+        # A frame has one image, or several labelled views (e.g. external and wrist camera).
+        views=frame.get('images') or [{'image':frame['image'],'sha256':frame['sha256']}]
+        for view in views:
+            raw=Path(view['image']).read_bytes()
+            if hashlib.sha256(raw).hexdigest()!=view['sha256']:
+                raise ValueError(f'Key frame checksum mismatch: {view["image"]}')
+            b64=base64.b64encode(raw).decode()
+            datas.append(b64)
+            if view.get('label'):
+                content.append({'type':text_type,'text':view['label']})
+            content.append(_image_block(b64, wire))
+    if manifest.get('outro'):
+        content.append({'type':text_type,'text':manifest['outro']})
+    return manifest, {'role':'user','content':content}, frozenset(datas)
+
+
 def load_demonstrations(path, task_id, wire='responses'):
     manifest=json.loads(Path(path).read_text())
+    if wire not in ('responses','messages'):
+        raise ValueError(f'unknown wire {wire!r}')
+    if manifest.get('kind')=='keyframes':
+        return _load_keyframes(manifest, task_id, wire)
     n=len(manifest['demos'])
     if manifest['task_id']!=task_id or n<1:
         raise ValueError('Expected at least one demonstration of the requested task')
