@@ -155,8 +155,8 @@ class BudgetTransport(httpx.BaseTransport):
                         self.stop('unsupported_image')
                     data=url.split(',',1)[1]
                     im=Image.open(io.BytesIO(base64.b64decode(data)))
-                    expected_size=(1152,848) if data in self.demo_datas else (256,256)
-                    if im.size != expected_size:
+                    expected_size=None if data in self.demo_datas else (256,256)
+                    if expected_size and im.size != expected_size:
                         self.stop('unexpected_image_size')
                     images+=1
                     image_tokens+=8192
@@ -168,8 +168,8 @@ class BudgetTransport(httpx.BaseTransport):
                         self.stop('unsupported_image')
                     data=source.get('data','')
                     im=Image.open(io.BytesIO(base64.b64decode(data)))
-                    expected_size=(1152,848) if data in self.demo_datas else (256,256)
-                    if im.size != expected_size:
+                    expected_size=None if data in self.demo_datas else (256,256)
+                    if expected_size and im.size != expected_size:
                         self.stop('unexpected_image_size')
                     images+=1
                     # Anthropic bills about w*h/750 tokens per image; reserve 2x.
