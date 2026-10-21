@@ -75,6 +75,13 @@ def export_results(source, visualization_data=False, video_index=None):
             row['calls'] = []
             for call, event in sorted(calls[episode].items(), key=lambda item: item[0] or 0):
                 usage = event.get('usage') or {}
+                if 'prompt_tokens' in usage:
+                    # Chat Completions usage (Gemini): billed output is total minus prompt, and
+                    # completion_tokens leaves out the thinking tokens.
+                    output = usage.get('total_tokens', 0) - usage.get('prompt_tokens', 0)
+                    usage = {'input_tokens': usage.get('prompt_tokens'), 'output_tokens': output,
+                             'input_tokens_details': {'cached_tokens': (usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0)},
+                             'output_tokens_details': {'reasoning_tokens': output - usage.get('completion_tokens', 0)}}
                 cached = usage.get('input_tokens_details') or {}
                 reasoning = usage.get('output_tokens_details') or usage.get('thinking_tokens') or {}
                 record = {'call': call, 'input_tokens': usage.get('input_tokens'),

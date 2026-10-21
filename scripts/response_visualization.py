@@ -47,7 +47,14 @@ def visualization(folder, episode, state, calls):
         path = folder / 'api' / f'ep{episode:02d}_call{number:02d}_response.json'
         payload = json.loads(path.read_text()) if path.is_file() else {}
         tools, texts = [], []
-        for item in payload.get('output', []) + payload.get('content', []):
+        items = payload.get('output', []) + payload.get('content', [])
+        # Chat Completions responses (Gemini) carry one message with tool_calls.
+        for choice in payload.get('choices', []):
+            message = choice.get('message') or {}
+            if message.get('content'):
+                items.append({'type': 'text', 'text': message['content']})
+            items.extend({'type': 'function_call', **call.get('function', {})} for call in message.get('tool_calls') or [])
+        for item in items:
             if item.get('type') in {'function_call', 'tool_use'}:
                 args = item.get('input', item.get('arguments', {}))
                 if isinstance(args, str):

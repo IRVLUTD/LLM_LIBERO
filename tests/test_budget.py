@@ -149,4 +149,32 @@ class AnthropicBudgetTests(unittest.TestCase):
         with self.assertRaises(BudgetStop):
             self.client.post('https://api.openai.com/v1/responses',json={'model':'claude-opus-5-5'})
 
+class GeminiBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.sent=[]
+        def reply(request):
+            self.sent.append(json.loads(request.content))
+            # completion_tokens leaves out thinking; total_tokens includes it.
+            return httpx.Response(200,json={'choices':[{'message':{'role':'assistant','content':'ok'},'finish_reason':'stop'}],
+                'usage':{'prompt_tokens':1000,'completion_tokens':50,'total_tokens':1350,
+                         'prompt_tokens_details':{'cached_tokens':600}}})
+        self.transport=BudgetTransport(self.tmp.name,15,inner=httpx.MockTransport(reply),
+                                       model='google/gemini-4-argon',max_output_tokens=8192)
+        self.client=httpx.Client(transport=self.transport)
+    def tearDown(self):
+        self.client.close(); self.transport.dispose(); self.tmp.cleanup()
+    def test_output_cap_and_thinking_billed(self):
+        self.transport.begin_episode(0)
+        self.client.post('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',json={
+            'model':'gemini-4-argon','messages':[],'tools':[]})
+        self.assertEqual(self.sent[0]['max_completion_tokens'],8192)
+        rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
+        # 400 uncached input, 600 cached input, 350 output (50 visible + 300 thinking).
+        self.assertAlmostEqual(rows[-1]['estimated_usd'],(400*2.+600*0.1+350*10.)/1e6)
+    def test_other_google_endpoint_rejected(self):
+        self.transport.begin_episode(0)
+        with self.assertRaises(BudgetStop):
+            self.client.post('https://generativelanguage.googleapis.com/v1beta/interactions',json={'model':'gemini-4-argon'})
+
 if __name__=='__main__': unittest.main()
