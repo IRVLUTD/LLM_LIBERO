@@ -138,6 +138,7 @@ python scripts/check_adapter.py
 # 4. Full closed loop with a mocked LLM (one run per provider wire)
 python scripts/check_closed_loop.py --model openai/gpt-6-astra
 python scripts/check_closed_loop.py --model anthropic/claude-opus-5-5
+python scripts/check_closed_loop.py --model google/gemini-4-argon
 ```
 
 Checks 3 and 4 each print a JSON line with `"passed": true`. Their outputs go
@@ -287,8 +288,9 @@ inspect-robots inspect outputs/logs/<log>.json --transcript   # what the model s
 inspect-robots view outputs/logs --serve                      # HTML viewer
 ```
 
-A run is a success only if LIBERO's success predicate holds at the end
-(`success_at_end = 1`). When the model calls `done`, the episode ends, but
+LIBERO's success predicate is checked after every control step. As soon as it
+becomes true, the episode ends as a success (`success_at_end = 1`), even in the
+middle of a `move_to` call. When the model calls `done`, the episode ends, but
 that does not count as success by itself.
 
 ## Use a different LLM
@@ -300,7 +302,7 @@ the endpoint from the prefix and the key from the matching variable in `.env`:
 |---|---|---|---|
 | OpenAI | `openai/gpt-6-sol` | `OPENAI_API_KEY` | `responses` |
 | Anthropic | `anthropic/claude-opus-5-5` | `ANTHROPIC_API_KEY` | `messages` |
-| Google Gemini | `google/gemini-3.7-flash` | `GEMINI_API_KEY` | `chat` (default) |
+| Google Gemini | `google/gemini-4-argon` | `GEMINI_API_KEY` | `chat` (default) |
 
 Example:
 
@@ -311,7 +313,8 @@ inspect-robots run --task libero_10 -T task_id=0 --embodiment libero \
 ```
 
 This repo was tested with `openai/gpt-6-astra`, `openai/gpt-6-luna`,
-`openai/gpt-6-sol`, `openai/gpt-6.1-sol`, and `anthropic/claude-opus-5-5`.
+`openai/gpt-6-sol`, `openai/gpt-6.1-sol`, `anthropic/claude-opus-5`,
+`anthropic/claude-opus-5-5`, and `google/gemini-4-argon`.
 
 ## Paid runs with spending caps
 
@@ -360,7 +363,8 @@ outputs/task02_opus_zeroshot/
 
 Only models with a price row are accepted: `openai/gpt-6-astra`,
 `openai/gpt-6-luna`, `openai/gpt-6-sol`, `openai/gpt-6.1-sol`,
-`anthropic/claude-opus-5-5`. To add
+`anthropic/claude-opus-5`, `anthropic/claude-opus-5-5`,
+`google/gemini-4-argon`. To add
 one, put its per-million-token prices in `PRICING` in
 `src/inspect_robots_libero/budget.py`. A new provider also needs entries in
 `PROVIDER_WIRE` and `WIRE_ENDPOINTS`. The provider's own billing is the final

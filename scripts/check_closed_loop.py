@@ -6,6 +6,7 @@ No key is needed; the fake key never leaves this process.
 
     python scripts/check_closed_loop.py --model openai/gpt-6-astra
     python scripts/check_closed_loop.py --model anthropic/claude-opus-5-5 --task-id 2
+    python scripts/check_closed_loop.py --model google/gemini-4-argon
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from inspect_robots_libero.embodiment import LiberoEmbodiment
 from inspect_robots_libero.tasks import libero_10_task
 
 ROOT = Path(__file__).resolve().parents[1]
-KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "google": "GEMINI_API_KEY"}
 
 parser = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -57,6 +58,14 @@ def fake(request: httpx.Request) -> httpx.Response:
             "output": [{"type": "function_call", "id": f"fc_{idx}", "call_id": f"call_{idx}",
                         "name": name, "arguments": json.dumps(tool_args)}],
             "usage": {"input_tokens": 100, "output_tokens": 100}})
+    if wire == "chat":
+        return httpx.Response(200, json={
+            "id": f"offline-{idx}", "object": "chat.completion",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant",
+                "tool_calls": [{"id": f"call_{idx}", "type": "function", "function": {
+                    "name": name, "arguments": json.dumps(tool_args)}}]}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 200}})
     return httpx.Response(200, headers={"request-id": f"offline-{idx}"}, json={
         "id": f"msg_offline_{idx}", "type": "message", "role": "assistant",
         "content": [{"type": "tool_use", "id": f"toolu_{idx}", "name": name, "input": tool_args}],
