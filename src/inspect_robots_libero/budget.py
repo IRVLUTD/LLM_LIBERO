@@ -30,6 +30,7 @@ class BudgetStop(RuntimeError):
 # stopping if reported provider usage crosses the short-context pricing threshold.
 _MAX_INPUT_RESERVE_TOKENS=600000
 _OPENAI_SHORT_CONTEXT_TOKENS=200000
+_GEMINI_MAX_INPUT_RESERVE_TOKENS=1000000
 
 # Which real endpoint + request shape a wire uses. 'responses' is OpenAI's
 # Responses API; 'messages' is Anthropic's native Messages API -- different
@@ -37,10 +38,12 @@ _OPENAI_SHORT_CONTEXT_TOKENS=200000
 WIRE_ENDPOINTS={
     'responses':('api.openai.com','/v1/responses'),
     'messages':('api.anthropic.com','/v1/messages'),
+    # Google's OpenAI-compatible Chat Completions endpoint for Gemini.
+    'chat':('generativelanguage.googleapis.com','/v1beta/openai/chat/completions'),
 }
 # Provider prefix (the part before '/' in an upstream model id) -> wire this
 # transport audits for it.
-PROVIDER_WIRE={'openai':'responses','anthropic':'messages'}
+PROVIDER_WIRE={'openai':'responses','anthropic':'messages','google':'chat'}
 # Needed for thinking.block_binding (see handle_request).
 _THINKING_BINDING_BETA='thinking-binding-controls-2026-08-01'
 # Transient provider responses (rate limit, overload, gateway errors): retried here
@@ -63,6 +66,10 @@ PRICING={
     'anthropic/claude-opus-5-5':(4.,0.2,5.,20.),
     # $5/$25 published; cache read 0.1x and 5-minute cache write 1.25x of input (2026-10-11).
     'anthropic/claude-opus-5':(5.,0.5,6.25,25.),
+    # Google AI Studio paid tier, verified 2026-10-14: $2 input, $0.10 implicit-cache read,
+    # $10 output including thinking. Implicit caching has no write charge, so the
+    # cache-write rate is the input rate. Prices double on 2026-12-01.
+    'google/gemini-4-argon':(2.,0.1,2.,10.),
 }
 
 
@@ -162,6 +169,18 @@ class BudgetTransport(httpx.BaseTransport):
                     image_tokens+=8192
                     value['detail']='high'
                     return {'type':'input_image','image_url':'[image]','detail':'high'}
+                if self.wire=='chat' and value.get('type')=='image_url':
+                    url=(value.get('image_url') or {}).get('url','')
+                    if not url.startswith('data:image/png;base64,'):
+                        self.stop('unsupported_image')
+                    data=url.split(',',1)[1]
+                    im=Image.open(io.BytesIO(base64.b64decode(data)))
+                    expected_size=None if data in self.demo_datas else (256,256)
+                    if expected_size and im.size != expected_size:
+                        self.stop('unexpected_image_size')
+                    images+=1
+                    image_tokens+=8192
+                    return {'type':'image_url','image_url':{'url':'[image]'}}
                 if self.wire=='messages' and value.get('type')=='image':
                     source=value.get('source') or {}
                     if source.get('type')!='base64' or source.get('media_type')!='image/png':
@@ -175,6 +194,12 @@ class BudgetTransport(httpx.BaseTransport):
                     # Anthropic bills about w*h/750 tokens per image; reserve 2x.
                     image_tokens+=2*(-(-im.size[0]*im.size[1]//750))
                     return {'type':'image','source':{'type':'base64','media_type':'image/png','data':'[image]'}}
+                if self.wire=='chat' and isinstance(value.get('thought_signature'),str):
+                    # Gemini replays each call's thinking as an opaque thought_signature (about
+                    # 4 bytes per thinking token) and bills it as input; count it at that rate
+                    # instead of one token per byte, which would hit the ceiling by call ~30.
+                    signature_tokens+=len(value['thought_signature'])//4
+                    return {k:walk(v) for k,v in value.items() if k!='thought_signature'}
                 if self.wire=='messages' and value.get('type')=='thinking' and 'signature' in value:
                     # The signature carries the encrypted thinking. Opus 5 bills replayed thinking
                     # as input (about 4 signature bytes per thinking token); Opus 5.5 does not. Counting
@@ -204,7 +229,7 @@ class BudgetTransport(httpx.BaseTransport):
         if body.get('model')!=self.wire_model:
             self.stop('model_not_allowed')
         tools=body.get('tools', [])
-        if self.wire=='responses':
+        if self.wire in ('responses','chat'):
             if any(t.get('type')!='function' for t in tools):
                 self.stop('non_robot_function_tool')
         else:
@@ -218,6 +243,11 @@ class BudgetTransport(httpx.BaseTransport):
         if self.wire=='responses':
             body.update(max_output_tokens=self.max_output_tokens, service_tier='default', store=False)
             body['metadata']={'experiment':'llm_libero_10','task_id':str(self.task_id),'episode':str(self.episode)}
+            output_cap=self.max_output_tokens
+        elif self.wire=='chat':
+            # Upstream's chat client sends no output limit. On Gemini, max_completion_tokens
+            # caps thinking plus the visible answer together, like max_output_tokens above.
+            body['max_completion_tokens']=self.max_output_tokens
             output_cap=self.max_output_tokens
         else:
             # _anthropic.py already sets max_tokens on the outgoing body;
@@ -240,6 +270,10 @@ class BudgetTransport(httpx.BaseTransport):
                          and images>self.max_live_images+len(self.demo_datas))
         # Keep OpenAI requests below long-context pricing thresholds.
         input_limit=_MAX_INPUT_RESERVE_TOKENS
+        if self.wire=='chat':
+            # Gemini accepts about 1.05M input tokens, and replayed thinking makes late calls
+            # in an 80-call episode reach a few hundred thousand real tokens.
+            input_limit=_GEMINI_MAX_INPUT_RESERVE_TOKENS
         if too_many_images or input_reserve>input_limit:
             self.stop('input_reservation_limit')
         # Reserve the full enforced output limit, including reasoning tokens.
@@ -297,13 +331,25 @@ class BudgetTransport(httpx.BaseTransport):
               'api_error_code':error_code,'latency_s':time.monotonic()-request_start,
               'response_status':payload.get('status') if isinstance(payload,dict) else None,
               'incomplete_details':payload.get('incomplete_details') if isinstance(payload,dict) else None}
+        usage_keys=('prompt_tokens','total_tokens') if self.wire=='chat' else ('input_tokens','output_tokens')
         valid_usage=isinstance(usage,dict) and all(
             isinstance(usage.get(k),int) and not isinstance(usage.get(k),bool) and usage[k]>=0
-            for k in ('input_tokens','output_tokens'))
+            for k in usage_keys)
         if valid_usage and response.status_code==200:
             in_rate,cached_rate,write_rate,out_rate=PRICING[self.model]
-            out=int(usage['output_tokens'])
-            if self.wire=='responses':
+            if self.wire=='chat':
+                # Gemini's completion_tokens leaves out thinking, which is billed as output;
+                # total_tokens - prompt_tokens is the full billed output.
+                out=int(usage['total_tokens'])-int(usage['prompt_tokens'])
+                data['finish_reason']=[c.get('finish_reason') for c in payload.get('choices') or []] if isinstance(payload,dict) else None
+            else:
+                out=int(usage['output_tokens'])
+            if self.wire=='chat':
+                inp=int(usage['prompt_tokens'])
+                cached=int((usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
+                total_in=inp
+                estimated=((inp-cached)*in_rate+cached*cached_rate+out*out_rate)/1e6
+            elif self.wire=='responses':
                 inp=int(usage['input_tokens'])
                 cached=int((usage.get('input_tokens_details') or {}).get('cached_tokens',0))
                 written=int((usage.get('input_tokens_details') or {}).get('cache_write_tokens',0))

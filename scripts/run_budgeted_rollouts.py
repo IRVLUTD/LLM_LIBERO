@@ -36,7 +36,7 @@ from inspect_robots_libero.embodiment import LiberoEmbodiment
 from inspect_robots_libero.tasks import LIBERO_10_TASKS, NUM_INIT_STATES, libero_10_task
 
 ROOT = Path(__file__).resolve().parents[1]
-KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "google": "GEMINI_API_KEY"}
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
