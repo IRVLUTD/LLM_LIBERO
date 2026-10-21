@@ -1,5 +1,9 @@
 # LLM_LIBERO
 
+<p align="center">
+  <a href="https://irvlutd.github.io/LLM-LIBERO/"><strong>Explore the Project Website →</strong></a>
+</p>
+
 Run frontier LLMs (GPT, Claude, Gemini, anything behind an OpenAI-compatible
 API) as closed-loop control policies on the [LIBERO-10](https://libero-project.github.io/)
 manipulation benchmark.
