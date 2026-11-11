@@ -73,7 +73,9 @@ BASE_DOCS = (
     "7. Prefer fewer, purposeful moves over many tiny corrections; your call budget is "
     "limited.\n"
     "8. Declare success only when the latest observation clearly shows that the requested "
-    "final state has been achieved."
+    "final state has been achieved.\n"
+    "9. Left and right in the instruction are meant from the robot arm's own point of "
+    "view, not from the third-person view of the external (agentview) camera."
 )
 
 
