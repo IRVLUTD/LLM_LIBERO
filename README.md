@@ -1,5 +1,9 @@
 # LLM_LIBERO
 
+**SO-101 / VLA Replica:** [editable task scenes, shared LIBERO/Replica evaluation,
+and low/medium/high reasoning spreadsheets](REPLICA.md). The integration keeps
+the external VLA Replica repository read-only; offline tests require no API key.
+
 Run frontier LLMs (GPT, Claude, Gemini, anything behind an OpenAI-compatible
 API) as closed-loop control policies on the [LIBERO-10](https://libero-project.github.io/)
 manipulation benchmark.
