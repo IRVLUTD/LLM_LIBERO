@@ -22,12 +22,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 replica = ["mujoco>=3.3", "scipy>=1.10", "imageio>=2.31", "imageio-ffmpeg>=0.4"]
+hardware = ["scipy>=1.10", "opencv-python>=4", "imageio>=2.31", "imageio-ffmpeg>=0.4"]
 
 # Entry-point discovery: once installed, `inspect-robots list` shows these
 # without importing the package first.
 [project.entry-points."inspect_robots.embodiments"]
 libero = "inspect_robots_libero:libero_embodiment"
 vla_replica = "inspect_robots_libero.replica.embodiment:replica_embodiment"
+so101_hardware = "inspect_robots_libero.hardware.embodiment:hardware_embodiment"
+so101_upstream_joint = "inspect_robots_libero.hardware.upstream:upstream_joint_embodiment"
+so101_upstream_cartesian = "inspect_robots_libero.hardware.upstream:upstream_cartesian_embodiment"
 
 [project.entry-points."inspect_robots.tasks"]
 libero_10 = "inspect_robots_libero:libero_10"

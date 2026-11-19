@@ -28,11 +28,13 @@ from inspect_robots_libero.embodiment import LiberoEmbodiment, BASE_DOCS
 from inspect_robots_libero.evaluation_report import write_reports
 from inspect_robots_libero.replica.embodiment import ReplicaEmbodiment, replica_task, DOCS
 from inspect_robots_libero.replica.scenes import read_scene, sha256
+from inspect_robots_libero.hardware.embodiment import SO101HardwareEmbodiment, hardware_task
 from inspect_robots_libero.tasks import libero_10_task, LIBERO_10_TASKS
 
 ROOT = Path(__file__).resolve().parents[1]
 EFFORTS = ("low", "medium", "high")
 KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+HARDWARE_BENCHMARKS = ("hardware", "so101-upstream")
 
 
 class AttemptRecorder(httpx.BaseTransport):
@@ -71,7 +73,7 @@ class RecordedLibero(LiberoEmbodiment):
         return obs
 
 
-def mock_transport(model, wire):
+def mock_transport(model, wire, *, native_joint=False, open_gripper=100.):
     """Only local replies. Exercises real tools, motion, images and accounting."""
     calls = 0
 
@@ -79,7 +81,8 @@ def mock_transport(model, wire):
         nonlocal calls
         calls += 1
         if calls == 1:
-            name, arguments = "move_to", dict(targets={"gripper": 0.}, note="Offline check: open the gripper in place.")
+            name = "move_joints" if native_joint else "move_to"
+            arguments = dict(targets={"gripper": open_gripper if native_joint else 0.}, note="Offline check: open the gripper in place.")
         else:
             name, arguments = "give_up", dict(reason="Offline integration check complete.", hindsight="none")
         if wire == "responses":
@@ -98,7 +101,7 @@ def mock_transport(model, wire):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--benchmark", choices=("replica", "libero"), default="replica")
+    p.add_argument("--benchmark", choices=("replica", "libero", "hardware", "so101-upstream"), default="replica")
     p.add_argument("--catalog", type=Path)
     p.add_argument("--scene-json", type=Path, action="append")
     p.add_argument("--subset", choices=("ID", "OOD", "AB"), action="append")
@@ -115,8 +118,15 @@ def parser():
     p.add_argument("--per-run-budget", type=float)
     p.add_argument("--pricing-file", type=Path, help="JSON mapping provider/model to four per-million input/cache-read/cache-write/output rates")
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--no-video", action="store_true", help="Replica only")
+    p.add_argument("--no-video", action="store_true", help="Replica and hardware")
     p.add_argument("--viewer", action="store_true", help="Replica: watch live simulation in a desktop window at 20 Hz")
+    p.add_argument("--hardware-config", type=Path, help="SO-101 serial/cameras/profile/calibration/reset settings JSON")
+    p.add_argument("--hardware-mode", choices=("mock", "dry-run", "execute"), default="mock",
+                   help="Independent of API mode: mock devices, read-only real devices, or bounded motor execution")
+    p.add_argument("--assume-calibration", action="store_true", help="Explicitly record acceptance of an unverified hardware profile")
+    p.add_argument("--auto-start", action="store_true", help="Skip real-hardware operator scene-setup wait")
+    p.add_argument("--policy-seconds", type=float, default=900, help="Hardware episode wall-time limit including inference")
+    p.add_argument("--control", choices=("joint", "cartesian"), help="so101-upstream only: default joint; Cartesian adds our IK bridge")
     modes = p.add_mutually_exclusive_group()
     modes.add_argument("--mock", action="store_true")
     modes.add_argument("--execute-paid-rollouts", action="store_true")
@@ -155,12 +165,16 @@ def select_scenes(args):
             continue
         if scene["id"] in seen:
             raise ValueError(f"Duplicate scene ID {scene['id']}")
-        if not path.with_suffix(".xml").is_file():
+        if args.benchmark not in HARDWARE_BENCHMARKS and not path.with_suffix(".xml").is_file():
             raise ValueError(f"Compile scene before running: {path}")
         seen.add(scene["id"])
         scene.update(scene_config=str(path), scene_json_sha256=sha256(path),
-                     scene_xml_sha256=sha256(path.with_suffix(".xml")),
+                     scene_xml_sha256=sha256(path.with_suffix(".xml")) if args.benchmark not in HARDWARE_BENCHMARKS else None,
                      calibration_status=scene["calibration"]["status"])
+        if args.benchmark in HARDWARE_BENCHMARKS:
+            scene = {key: scene[key] for key in ("id", "task_id", "subset", "variation", "instruction", "scene_config", "scene_json_sha256", "provenance")}
+            fidelity = {"mock": "mock_hardware", "dry-run": "physical_observation_dry_run", "execute": "physical_robot"}[args.hardware_mode]
+            scene.update(fidelity=fidelity, calibration_status="hardware_profile_pending")
         scenes.append(scene)
     if not scenes:
         raise ValueError("No scenes matched the selectors")
@@ -170,13 +184,38 @@ def select_scenes(args):
 def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
+    if args.control and args.benchmark != "so101-upstream":
+        p.error("--control applies only to --benchmark so101-upstream")
     if args.viewer and args.benchmark != "replica":
         p.error("--viewer is currently supported for Replica only")
+    if args.benchmark not in HARDWARE_BENCHMARKS and (args.hardware_config or args.hardware_mode != "mock" or args.assume_calibration or args.auto_start):
+        p.error("Hardware configuration/mode flags require --benchmark hardware or so101-upstream")
     out = args.output.resolve()
     if args.report_only:
         write_reports(out)
         print(out/"evaluation.xlsx")
         return
+    if not math.isfinite(args.policy_seconds) or args.policy_seconds <= 0:
+        p.error("policy-seconds must be positive and finite")
+    hardware_template = None
+    hardware_factory = SO101HardwareEmbodiment
+    hardware_kwargs = {}
+    if args.benchmark in HARDWARE_BENCHMARKS:
+        if args.hardware_mode != "mock" and args.hardware_config is None:
+            p.error("Real devices require an explicit --hardware-config")
+        if args.mock and args.hardware_mode == "execute":
+            p.error("Mocked LLM responses cannot drive real motors; use --hardware-mode mock or dry-run")
+        try:
+            if args.benchmark == "so101-upstream":
+                from inspect_robots_libero.hardware.upstream import SO101UpstreamEmbodiment
+                hardware_factory = SO101UpstreamEmbodiment
+                hardware_kwargs = {"control": args.control or "joint"}
+            hardware_template = hardware_factory(config_path=args.hardware_config,
+                mode=args.hardware_mode, assume_calibration=args.assume_calibration,
+                max_steps=args.max_steps, policy_seconds=args.policy_seconds,
+                auto_start=args.auto_start, video=not args.no_video, **hardware_kwargs)
+        except (ValueError, KeyError, OSError, RuntimeError, ImportError) as exc:
+            p.error(str(exc))
     for name in ("max_calls", "max_steps", "repeat", "max_output_tokens"):
         if getattr(args, name) < 1:
             p.error(f"{name} must be positive")
@@ -207,6 +246,13 @@ def main(argv=None):
         if len(models) != len(set(models)) or len(efforts) != len(set(efforts)):
             raise ValueError("Model and effort selections must be unique")
         scenes = select_scenes(args)
+        if hardware_template is not None:
+            hardware_status = "assumed" if args.assume_calibration else (
+                "verified_profile" if hardware_template.profile.get("kinematics_verified") and hardware_template.profile.get("world_frame_verified") else "unverified")
+            if args.benchmark == "so101-upstream" and hardware_kwargs["control"] == "joint":
+                hardware_status = "motor_calibration_file; Cartesian_frame_unused"
+            for scene in scenes:
+                scene["calibration_status"] = hardware_status
     except (ValueError, KeyError, OSError) as exc:
         p.error(str(exc))
     settings = {**read_dotenv(ROOT/".env"), **os.environ} if args.execute_paid_rollouts else {}
@@ -219,7 +265,7 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=False)
     protocol = dict(created_utc=datetime.now(timezone.utc).isoformat(), benchmark=args.benchmark,
         accounting_mode=mode, models=models, efforts=efforts, max_calls=args.max_calls,
-        max_steps=args.max_steps, max_output_tokens=args.max_output_tokens, control_hz=20,
+        max_steps=args.max_steps, max_output_tokens=args.max_output_tokens, control_hz=hardware_template.info.control_hz if hardware_template else 20,
         image_horizon=2, eval_seed=42, total_budget_usd=(args.total_budget or 100.) if args.mock else args.total_budget,
         per_run_budget_usd=(args.per_run_budget or 5.) if args.mock else args.per_run_budget, zero_shot=True,
         live_viewer=args.viewer, motion_wall_pacing=args.viewer,
@@ -228,12 +274,23 @@ def main(argv=None):
         pricing_file_sha256=sha256(args.pricing_file) if args.pricing_file else None,
         project_commit=subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip(),
         inspect_robots_commit=(ROOT/"upstream_commit.txt").read_text().strip(),
-        embodiment_prompt=DOCS if args.benchmark == "replica" else BASE_DOCS,
+        embodiment_prompt=hardware_template.docs if hardware_template else DOCS if args.benchmark == "replica" else BASE_DOCS,
         scene_snapshots=scenes,
         notes=["Replica task IDs follow task filenames, not paper Table 3 numbering.",
                "Layouts marked approximate have not been calibrated to reference photographs.",
                "Mock costs are simulated and do not represent API spending.",
                "Total agent cost includes all API tokens; reasoning output cost is an optional subset."])
+    if hardware_template is not None:
+        protocol.update(hardware_config=hardware_template.settings, hardware_config_file=hardware_template.config_path,
+            hardware_config_sha256=sha256(hardware_template.config_path), hardware_profile=hardware_template.profile,
+            hardware_mode=args.hardware_mode, calibration_assumed=args.assume_calibration,
+            policy_seconds=args.policy_seconds, auto_start=args.auto_start,
+            step_definition="Actually sent task motor waypoints including retries; reset and hold commands tracked separately.",
+            success_scoring="Human label; model done is unverified. No simulated task predicates.")
+        protocol["control_interface"] = hardware_kwargs.get("control", "cartesian")
+        if args.benchmark == "so101-upstream":
+            protocol["upstream_so101"] = hardware_template.upstream
+            protocol["adapter_implementation"] = "Actual upstream SOArmEmbodiment with isolated LeRobot I/O factory; Cartesian mode adds LLM_LIBERO IK"
     protocol["embodiment_prompt_sha256"] = hashlib.sha256(protocol["embodiment_prompt"].encode()).hexdigest()
     runs = []
     for scene in scenes:
@@ -241,11 +298,17 @@ def main(argv=None):
             for mi, model in enumerate(models):
                 for effort in efforts:
                     ident = f"{scene['id']}_r{repeat:02d}_m{mi:02d}_{effort}"
+                    if args.benchmark == "so101-upstream":
+                        ident += "_"+hardware_kwargs["control"]
                     runs.append(dict(id=ident, run_folder=ident, benchmark=args.benchmark,
                         subset=scene["subset"], task_id=scene["task_id"], variation=scene["variation"],
                         repeat=repeat, instruction=scene["instruction"], model=model, effort=effort,
                         accounting_mode=mode, status="pending", fidelity=scene["fidelity"],
                         calibration_status=scene["calibration_status"], scene_id=scene["id"], steps=None))
+                    if hardware_template is not None:
+                        runs[-1].update(device_mode=args.hardware_mode, control_hz=hardware_template.info.control_hz,
+                                        human_success=None, success_source="unscored",
+                                        control_interface=hardware_kwargs.get("control", "cartesian"))
     data = dict(protocol=protocol, status="running" if execute else "planned", budget_charge_usd=0., runs=runs)
 
     def save():
@@ -269,7 +332,8 @@ def main(argv=None):
             scene = next(s for s in scenes if s["id"] == row["scene_id"])
             folder = out/row["run_folder"]
             wire = wire_for(row["model"])
-            inner = mock_transport(row["model"], wire) if args.mock else httpx.HTTPTransport(retries=0)
+            mock_kwargs = {"native_joint": True, "open_gripper": hardware_template.profile["gripper_open_motor"]} if args.benchmark == "so101-upstream" and hardware_kwargs["control"] == "joint" else {}
+            inner = mock_transport(row["model"], wire, **mock_kwargs) if args.mock else httpx.HTTPTransport(retries=0)
             cap = min(remaining, per_budget)
             transport = BudgetTransport(folder/"api", cap, cap, inner=inner, model=row["model"],
                 task_id=scene["task_id"], max_calls=args.max_calls, image_horizon=2,
@@ -285,6 +349,12 @@ def main(argv=None):
                     env = ReplicaEmbodiment(scene_config=scene["scene_config"], output_dir=folder/"sim",
                                             max_steps=args.max_steps, video=not args.no_video, viewer=args.viewer)
                     task = replica_task(scene["scene_config"], max_steps=args.max_steps)
+                elif args.benchmark in HARDWARE_BENCHMARKS:
+                    env = hardware_factory(config_path=args.hardware_config, mode=args.hardware_mode,
+                        assume_calibration=args.assume_calibration, output_dir=folder/"hardware",
+                        max_steps=args.max_steps, policy_seconds=args.policy_seconds,
+                        auto_start=args.auto_start, video=not args.no_video, **hardware_kwargs)
+                    task = hardware_task(scene["scene_config"], max_steps=args.max_steps)
                 else:
                     env = RecordedLibero(task_id=scene["task_id"], output_dir=folder/"sim",
                                          libero_python=settings.get("LIBERO_PYTHON"))
@@ -292,11 +362,12 @@ def main(argv=None):
                 key_name = KEYS[row["model"].partition("/")[0]]
                 policy = agent_policy(model=row["model"], env={key_name: "offline-fake" if args.mock else settings[key_name]},
                     wire=wire, effort=row["effort"], max_llm_calls=args.max_calls, image_horizon=2,
-                    prior_learnings=None, transport=transport, wire_capture=False)
+                    prior_learnings=None, transport=transport, wire_capture=False,
+                    **({"pre_check": env.preflight} if args.benchmark in HARDWARE_BENCHMARKS else {}))
                 space = env.info.action_space
                 (log,) = evaluate(task, policy, env, seed=42, log_dir=str(folder/"inspect"),
                     store_frames=True, store_actions=True, grader=None,
-                    approver=ChainApprover(ClampApprover(space), DeltaLimitApprover(space)))
+                    approver=env.make_approver() if args.benchmark in HARDWARE_BENCHMARKS else ChainApprover(ClampApprover(space), DeltaLimitApprover(space)))
                 row.update(status="finished" if log.status == "success" else "error", framework_status=log.status,
                            termination_reasons=[reason for sample in log.samples for reason in sample.termination_reasons])
             except KeyboardInterrupt:
@@ -319,20 +390,31 @@ def main(argv=None):
                                    budget_charge_usd=transport.used, stop_detail=transport.blocked)
                         if env is not None:
                             last = env.last or {}
-                            row.update(steps=last.get("steps", 0), environment_success=bool(last.get("success", False)),
+                            row.update(steps=last.get("steps", 0), environment_success=None if args.benchmark in HARDWARE_BENCHMARKS else bool(last.get("success", False)),
                                        initial_observation_sha256=env.initial_hash)
+                            if args.benchmark in HARDWARE_BENCHMARKS:
+                                row.update({key: last.get(key) for key in ("framework_steps", "planned_control_steps", "reset_control_steps", "motor_writes", "hold_writes", "device_mode")})
+                                row["hardware_stop_detail"] = last.get("stopped")
+                                if args.benchmark == "so101-upstream":
+                                    row["upstream_steps"] = last.get("upstream_steps")
+                                    row["upstream_step_info"] = last.get("upstream_step_info")
                             (folder/"trajectory.json").write_text(json.dumps(env.trajectory))
                         data["budget_charge_usd"] += transport.used
                         if transport.uncertain:
                             row["status"] = "usage_unknown"
                         elif transport.blocked:
                             row["status"] = "budget_stopped" if "budget" in transport.blocked else "stopped"
+                        elif row.get("hardware_stop_detail"):
+                            row["status"] = "hardware_stopped"
                         elif row.get("environment_success"):
                             row["status"] = "task_success"
                         save()
             print(json.dumps({k: row.get(k) for k in ("id", "status", "steps", "budget_charge_usd")}), flush=True)
             if transport.uncertain:
                 data["status"] = "stopped_usage_unknown"
+                break
+            if args.benchmark in HARDWARE_BENCHMARKS and (row.get("hardware_stop_detail") or row["status"] == "error" or transport.blocked):
+                data["status"] = "stopped_hardware"
                 break
         else:
             data["status"] = "completed"

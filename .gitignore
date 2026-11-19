@@ -5,6 +5,7 @@
 
 # Local environments and the pinned upstream checkout (see README).
 .venv/
+.venv-so101-upstream/
 vendor/
 
 # Rollout videos, eval logs, API audit files.

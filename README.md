@@ -4,6 +4,12 @@
 and low/medium/high reasoning spreadsheets](REPLICA.md). The integration keeps
 the external VLA Replica repository read-only; offline tests require no API key.
 
+**Real SO-101:** [hardware adapter, device configuration, read-only checks, and
+bounded execution using the same LLM policy](HARDWARE.md).
+
+**Upstream SO-101 comparison:** [separate native joint and Cartesian-to-upstream
+benchmarks using the actual inspect-robots-so101 embodiment](SO101_UPSTREAM.md).
+
 Run frontier LLMs (GPT, Claude, Gemini, anything behind an OpenAI-compatible
 API) as closed-loop control policies on the [LIBERO-10](https://libero-project.github.io/)
 manipulation benchmark.

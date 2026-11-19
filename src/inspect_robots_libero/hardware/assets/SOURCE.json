@@ -1,0 +1,7 @@
+{
+  "source_url": "https://huggingface.co/datasets/lerobot/robot-urdfs/resolve/main/so101/so101_new_calib.urdf",
+  "upstream": "TheRobotStudio/SO-ARM100",
+  "license": "Apache-2.0",
+  "sha256": "3a65d2d35e68a8d2f0c2cc176d19b884506543c93ba72980145b80abe276022c",
+  "usage": "Kinematic joints only; visual/collision meshes are not loaded."
+}

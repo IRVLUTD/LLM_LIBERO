@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/robocurve/inspect-robots-so101",
+  "commit": "9071de0e6fdbda44336b071544e2f8cee6a53a00",
+  "source_sha256": {
+    "embodiment.py": "16a5600209f0cfbdbb88808e7ec61a2bac0c7ad42baf192107b97e4f97c1ac76",
+    "config.py": "c21141f54ab1fc226152540b5eb0b12c496465374873349ce21396017a6b8a67",
+    "packing.py": "42d20b4f8ad43d356318fe9658503a0c4aa4a5c841749413fb9884712c4e8719",
+    "operator.py": "037f4376633c04be86336eedf609cd50d484f2e741e9cb988a1650d60cbd282f"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "kinematics_verified": false,
+  "world_frame_verified": false,
+  "urdf": "so101_new_calib.urdf",
+  "base_link": "base_link",
+  "tip_link": "gripper_frame_link",
+  "world_frame_description": "Robot URDF base_link axes. Measure and verify their relation to the physical table before execution.",
+  "world_from_base_xyz_m": [
+    0,
+    0,
+    0
+  ],
+  "world_from_base_rpy_rad": [
+    0,
+    0,
+    0
+  ],
+  "tip_from_tool_xyz_m": [
+    0,
+    0,
+    0
+  ],
+  "tip_from_tool_rpy_rad": [
+    -1.5707963267948966,
+    0,
+    0
+  ],
+  "joint_signs": [
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "joint_offsets_deg": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "joint_limit_overrides_deg": {},
+  "gripper_open_motor": 100,
+  "gripper_closed_motor": 0,
+  "workspace_m": {
+    "x": [
+      -0.4,
+      0.4
+    ],
+    "y": [
+      -0.4,
+      0.4
+    ],
+    "z": [
+      0.02,
+      0.45
+    ]
+  },
+  "linear_speed_m_s": 0.02,
+  "angular_speed_rad_s": 0.4,
+  "joint_speed_deg_s": 15,
+  "gripper_speed_units_s": 40,
+  "max_translation_m": 0.05,
+  "max_tracking_error_deg": 6,
+  "position_tolerance_m": 0.005,
+  "control_hz": 20,
+  "observation_max_age_s": 60,
+  "camera_calibration": {}
+}

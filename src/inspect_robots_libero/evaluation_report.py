@@ -14,17 +14,21 @@ from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_DEFLATED
 
 EPISODE_FIELDS = ["id", "benchmark", "subset", "task_id", "variation", "repeat", "instruction",
-    "model", "effort", "accounting_mode", "status", "termination_reasons", "steps", "simulated_seconds",
+    "model", "effort", "accounting_mode", "device_mode", "control_interface", "status", "termination_reasons", "steps", "simulated_seconds",
+    "commanded_motion_seconds", "framework_steps", "planned_control_steps", "reset_control_steps", "motor_writes", "hold_writes",
+    "hardware_stop_detail", "stop_detail", "error_type",
+    "upstream_steps", "upstream_step_info",
     "llm_calls", "http_attempts", "real_api_calls", "mock_calls", "usage_complete",
     "estimated_cost_usd", "known_cost_subtotal_usd", "mean_cost_per_call_usd",
     "reasoning_output_cost_usd", "simulated_cost_usd", "budget_charge_usd", "wall_seconds",
-    "environment_success", "fidelity", "calibration_status", "initial_observation_sha256", "run_folder"]
-CALL_FIELDS = ["run_id", "benchmark", "subset", "task_id", "variation", "repeat", "model", "effort",
+    "environment_success", "human_success", "success_source", "success_note", "fidelity", "calibration_status", "initial_observation_sha256", "run_folder"]
+CALL_FIELDS = ["run_id", "benchmark", "control_interface", "subset", "task_id", "variation", "repeat", "model", "effort",
     "accounting_mode", "call", "http_status", "latency_s", "input_tokens", "cached_input_tokens",
     "cache_write_tokens", "output_tokens", "reasoning_tokens", "estimated_cost_usd",
     "reasoning_output_cost_usd", "simulated_cost_usd", "budget_charge_usd", "usage_known"]
-SUMMARY_FIELDS = ["benchmark", "model", "effort", "fidelity", "calibration_status", "accounting_mode",
-    "episodes", "completed_episodes", "successful_episodes", "control_steps", "llm_calls",
+GROUP_FIELDS = ["benchmark", "model", "effort", "fidelity", "calibration_status", "accounting_mode", "device_mode", "control_interface"]
+SUMMARY_FIELDS = GROUP_FIELDS + [
+    "episodes", "completed_episodes", "scored_episodes", "successful_episodes", "control_steps", "llm_calls",
     "http_attempts", "real_api_calls", "mock_calls", "unknown_usage_episodes",
     "known_cost_subtotal_usd", "total_cost_usd", "mean_cost_per_call_usd", "simulated_cost_usd"]
 
@@ -70,7 +74,7 @@ def report_rows(root, data):
                               if isinstance(reasoning_tokens, int) and price else None)
             if reasoning_cost is not None:
                 reasoning_costs.append(reasoning_cost)
-            inherited = {k: row.get(k) for k in ("benchmark", "subset", "task_id", "variation", "repeat", "model", "effort", "accounting_mode")}
+            inherited = {k: row.get(k) for k in ("benchmark", "control_interface", "subset", "task_id", "variation", "repeat", "model", "effort", "accounting_mode")}
             call_row = dict(inherited, run_id=row["id"], call=call,
                 http_status=event.get("http_status"), latency_s=event.get("latency_s"),
                 input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
@@ -92,10 +96,11 @@ def report_rows(root, data):
             mean_cost_per_call_usd=sum(known)/len(call_ids) if complete and call_ids and not mock else None,
             simulated_cost_usd=sum(known) if complete and mock else None,
             reasoning_output_cost_usd=sum(reasoning_costs) if complete and not mock and len(reasoning_costs) == len(call_ids) else None,
-            simulated_seconds=row.get("steps", 0)/20 if row.get("steps") is not None else None)
+            simulated_seconds=row["steps"]/row.get("control_hz", 20) if row.get("steps") is not None and row.get("benchmark") not in ("hardware", "so101-upstream") else None,
+            commanded_motion_seconds=row["steps"]/row.get("control_hz", 20) if row.get("steps") is not None and row.get("benchmark") in ("hardware", "so101-upstream") else None)
         episodes.append(row)
     grouped = defaultdict(list)
-    group_fields = SUMMARY_FIELDS[:6]
+    group_fields = GROUP_FIELDS
     for row in episodes:
         grouped[tuple(row.get(k) for k in group_fields)].append(row)
     summaries = []
@@ -104,10 +109,13 @@ def report_rows(root, data):
         total_calls = sum(r["llm_calls"] for r in attempted)
         unknown = sum(not r["usage_complete"] for r in attempted)
         subtotal = sum(r["known_cost_subtotal_usd"] or 0 for r in attempted)
-        paid = group[-1] == "paid"
+        group_info = dict(zip(group_fields, group))
+        paid = group_info["accounting_mode"] == "paid"
+        success_field = "human_success" if group_info["benchmark"] in ("hardware", "so101-upstream") else "environment_success"
+        scored = [r for r in attempted if isinstance(r.get(success_field), bool)]
         summaries.append(dict(zip(group_fields, group), episodes=len(rows),
             completed_episodes=sum(r["status"] in ("finished", "task_success") for r in rows),
-            successful_episodes=sum(r.get("environment_success") is True for r in rows),
+            scored_episodes=len(scored), successful_episodes=sum(r.get(success_field) is True for r in scored) if scored else None,
             control_steps=sum(r.get("steps") or 0 for r in attempted) if attempted else None,
             llm_calls=total_calls, http_attempts=sum(r["http_attempts"] for r in attempted),
             real_api_calls=sum(r["real_api_calls"] for r in attempted), mock_calls=sum(r["mock_calls"] for r in attempted),
@@ -130,12 +138,13 @@ def write_reports(root):
     notes = {
         "agent_cost": "Sum of all input/cache/output API token costs; excludes local compute. Provider billing is authoritative.",
         "reasoning_output_cost": "Optional subset of output cost, already included in total; blank when provider does not report reasoning tokens.",
-        "steps": "20 Hz simulator control ticks, including rejected waypoint ticks; excludes initial settling. Not API calls or task events.",
+        "steps": "Simulation: control ticks, excluding settling. Hardware: actually sent task motor waypoints including retries; reset/hold writes separate. Dry-run plans never count as executed steps.",
         "llm_calls": "Logical provider requests. http_attempts also counts transport retries. Mock calls are not real API calls.",
         "blank_cells": "Unknown usage, unrun episodes, and unavailable metrics stay blank. Subtotals exclude unknown costs.",
         "mock": "No provider connection or billing. Simulated token costs are shown only in simulated_cost_usd.",
         "fidelity": "Approximate geometry/layouts and proxy scores are provisional, not calibrated real-world benchmark results.",
-        "grouping": "Summary groups benchmark, model, effort, fidelity, calibration status and accounting mode separately.",
+        "grouping": "Summary groups benchmark, model, effort, fidelity, calibration status, accounting mode and device mode separately.",
+        "hardware_success": "Physical success stays unscored until a human label; model done is not ground truth. Hardware has no simulated_seconds; commanded_motion_seconds excludes inference and catch-up waiting.",
         **{k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in protocol.items()}}
     tables.append(("Protocol", ["field", "value"], [dict(field=k, value=v) for k, v in notes.items()]))
     for title, fields, rows in tables[:3]:

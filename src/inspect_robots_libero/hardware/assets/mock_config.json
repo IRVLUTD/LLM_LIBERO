@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "profile_file": "profile.example.json",
+  "calibration_file": "mock_calibration.json",
+  "port": "MOCK-NO-SERIAL",
+  "follower_id": "offline_mock",
+  "top_index": 4,
+  "wrist_index": 6,
+  "width": 640,
+  "height": 480,
+  "fps": 30,
+  "zoom": 1.5,
+  "preview": false,
+  "video": false,
+  "reset_mode": "none"
+}

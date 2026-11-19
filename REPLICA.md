@@ -1,5 +1,7 @@
 # VLA Replica SO-101 simulation
 
+For the same LLM policy on a physical SO-101, see [the hardware adapter](HARDWARE.md).
+
 This integration runs VLA Replica scenes and LIBERO with the same Inspect Robots
 agent policy, reasoning-effort parameter, budget transport, and XLSX/CSV exporter.
 All preparation, simulation, and results live in **LLM_LIBERO**. The external

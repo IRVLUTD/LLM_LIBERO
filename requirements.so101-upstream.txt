@@ -1,0 +1,4 @@
+# Compatible with the repository's pinned Inspect Robots 0.58 core.
+# The next upstream commit requires Inspect Robots 1.0.
+inspect-robots @ git+https://github.com/robocurve/inspect-robots.git@4d35fe4b81a643c0e61e8d287810b3c26f9d386a
+inspect-robots-so101 @ git+https://github.com/robocurve/inspect-robots-so101.git@9071de0e6fdbda44336b071544e2f8cee6a53a00
