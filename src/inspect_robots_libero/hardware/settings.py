@@ -25,6 +25,7 @@ def load_settings(path=None):
     settings.setdefault("python", sys.executable)
     settings.setdefault("preview", True)
     settings.setdefault("video", True)
+    settings.setdefault("reference_overlay", True)
     settings.setdefault("width", 640)
     settings.setdefault("height", 480)
     settings.setdefault("fps", 30)
@@ -41,7 +42,7 @@ def load_settings(path=None):
             raise ValueError(f"{name} must be a positive integer")
     if not isinstance(settings["zoom"], (int, float)) or not math.isfinite(settings["zoom"]) or settings["zoom"] < 1:
         raise ValueError("zoom must be finite and >=1")
-    for name in ("preview", "video"):
+    for name in ("preview", "video", "reference_overlay"):
         if not isinstance(settings[name], bool):
             raise ValueError(f"{name} must be a boolean")
     if not settings.get("port") or not settings.get("follower_id"):

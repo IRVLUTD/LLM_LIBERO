@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "subset": "ID",
+  "tasks": [
+    {"task_id": 2, "scenes": [1, 3, 4]},
+    {"task_id": 4, "scenes": [1, 2, 5]},
+    {"task_id": 6, "scenes": [1, 2, 4]},
+    {"task_id": 9, "scenes": [1, 3, 4]},
+    {"task_id": 10, "scenes": [1, 3, 4]}
+  ]
+}

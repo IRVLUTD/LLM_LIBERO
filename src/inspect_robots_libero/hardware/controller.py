@@ -2,6 +2,7 @@
 """Physical SO101 adapter and bounded Cartesian-to-motor execution."""
 
 import math
+import json
 from pathlib import Path
 import time
 
@@ -124,9 +125,12 @@ class HardwareDriver:
 
 class MockDriver:
     """Offline test double, clearly labeled; not a manipulation simulation."""
-    def __init__(self):
+    def __init__(self,state_file=None):
         self.motors = dict(zip(MOTORS, [0., -30., 40., 30., 0., 65.]))
         self.sent = []
+        self.state_file=Path(state_file) if state_file else None
+        if self.state_file is not None and self.state_file.is_file():
+            self.motors=json.loads(self.state_file.read_text())
 
     def connect(self):
         pass
@@ -151,6 +155,11 @@ class MockDriver:
     def send(self, motors):
         self.sent.append(dict(motors))
         self.motors = dict(motors)
+        if self.state_file is not None:
+            self.state_file.parent.mkdir(parents=True,exist_ok=True)
+            temp=self.state_file.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(self.motors))
+            temp.replace(self.state_file)
         return dict(motors)
 
     def close(self):

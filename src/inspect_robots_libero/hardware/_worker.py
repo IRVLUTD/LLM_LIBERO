@@ -53,10 +53,19 @@ def main():
                 reply(runtime.capture_observation())
             elif operation == "diagnostics":
                 reply(runtime.diagnostics())
+            elif operation == "replay_plan":
+                reply(runtime.prepare_replay(request["targets"],source_hz=request["source_hz"],time_scale=request["time_scale"],
+                                             source_start_step=request.get("source_start_step",1)))
+            elif operation == "replay_run":
+                reply(runtime.run_replay(request["plan_id"]))
             elif operation == "setup":
                 reply(runtime.setup())
             elif operation == "start":
                 reply(runtime.start())
+            elif operation == "operator_view":
+                reply(runtime.operator_view(request.get("reference_image"),request["label"]))
+            elif operation == "operator_reset":
+                reply(runtime.operator_reset())
             elif operation == "plan":
                 reply(runtime.plan(request["targets"]))
             elif operation == "step":

@@ -7,6 +7,10 @@ the external VLA Replica repository read-only; offline tests require no API key.
 **Real SO-101:** [hardware adapter, device configuration, read-only checks, and
 bounded execution using the same LLM policy](HARDWARE.md).
 
+**Multi-scene hardware session:** `scripts/run_vla_replica_agent.py` runs the
+selected 15 scenes with terminal reset/scoring/retry controls, setup overlays,
+and timestamped outputs. See [the session workflow](HARDWARE.md#multi-scene-agent-session).
+
 **Upstream SO-101 comparison:** [separate native joint and Cartesian-to-upstream
 benchmarks using the actual inspect-robots-so101 embodiment](SO101_UPSTREAM.md).
 

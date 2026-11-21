@@ -37,6 +37,49 @@ KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 HARDWARE_BENCHMARKS = ("hardware", "so101-upstream")
 
 
+def prompt_hardware_torque_release(env, row, *, keep_torque=False):
+    """Human-controlled torque release after accounting and worker shutdown."""
+    if env is None or env.mode!="execute" or not (env.output/"worker.log").exists():
+        return
+    if keep_torque:
+        row.update(torque_release_status="kept_by_option",torque_disabled=None)
+        return
+    if not sys.stdin.isatty():
+        row.update(torque_release_status="kept_no_terminal",torque_disabled=None)
+        print("[END] No interactive terminal; torque release skipped and the existing hold preserved.",flush=True)
+        return
+    print("[END] Episode finished. Support the arm and remove/support any held object before releasing torque.",flush=True)
+    try:
+        answer=input("Press ENTER to disable torque on all six SO-101 motors, or type keep to retain the hold: ")
+    except EOFError:
+        row.update(torque_release_status="kept_on_eof",torque_disabled=None)
+        print("[END] Input closed; the existing hold is preserved.",flush=True)
+        return
+    except KeyboardInterrupt:
+        row.update(torque_release_status="kept_on_interrupt",torque_disabled=None)
+        raise
+    if answer.strip():
+        row.update(torque_release_status="kept_by_operator",torque_disabled=None)
+        print("[END] Keeping the existing hold.",flush=True)
+        return
+    row.update(torque_release_status="requested",torque_disabled=None)
+    report=env.release_torque_after_close()
+    row.update(torque_release_status=report["status"],torque_disabled=report["torque_disabled"])
+    if report["torque_disabled"] is True:
+        print("[END] Torque disabled on all six SO-101 motors.",flush=True)
+    else:
+        print(f"[END] Torque release could not be confirmed: {report.get('detail','see torque_release.json')}",flush=True)
+
+
+def wait_for_next_hardware_episode():
+    """Do not immediately re-enable an arm the operator has just released."""
+    try:
+        answer=input("Torque is disabled. Press ENTER when ready to initialize the next episode, or type q to finish: ")
+    except EOFError:
+        return False
+    return not answer.strip()
+
+
 class AttemptRecorder(httpx.BaseTransport):
     """Count actual wire attempts, including retries and interrupted requests."""
     def __init__(self, inner, owner):
@@ -125,6 +168,7 @@ def parser():
                    help="Independent of API mode: mock devices, read-only real devices, or bounded motor execution")
     p.add_argument("--assume-calibration", action="store_true", help="Explicitly record acceptance of an unverified hardware profile")
     p.add_argument("--auto-start", action="store_true", help="Skip real-hardware operator scene-setup wait")
+    p.add_argument("--keep-torque", action="store_true", help="Physical hardware: skip end-of-episode torque release prompt and retain the hold")
     p.add_argument("--policy-seconds", type=float, default=900, help="Hardware episode wall-time limit including inference")
     p.add_argument("--control", choices=("joint", "cartesian"), help="so101-upstream only: default joint; Cartesian adds our IK bridge")
     modes = p.add_mutually_exclusive_group()
@@ -188,7 +232,7 @@ def main(argv=None):
         p.error("--control applies only to --benchmark so101-upstream")
     if args.viewer and args.benchmark != "replica":
         p.error("--viewer is currently supported for Replica only")
-    if args.benchmark not in HARDWARE_BENCHMARKS and (args.hardware_config or args.hardware_mode != "mock" or args.assume_calibration or args.auto_start):
+    if args.benchmark not in HARDWARE_BENCHMARKS and (args.hardware_config or args.hardware_mode != "mock" or args.assume_calibration or args.auto_start or args.keep_torque):
         p.error("Hardware configuration/mode flags require --benchmark hardware or so101-upstream")
     out = args.output.resolve()
     if args.report_only:
@@ -284,7 +328,7 @@ def main(argv=None):
         protocol.update(hardware_config=hardware_template.settings, hardware_config_file=hardware_template.config_path,
             hardware_config_sha256=sha256(hardware_template.config_path), hardware_profile=hardware_template.profile,
             hardware_mode=args.hardware_mode, calibration_assumed=args.assume_calibration,
-            policy_seconds=args.policy_seconds, auto_start=args.auto_start,
+            policy_seconds=args.policy_seconds, auto_start=args.auto_start,keep_torque=args.keep_torque,
             step_definition="Actually sent task motor waypoints including retries; reset and hold commands tracked separately.",
             success_scoring="Human label; model done is unverified. No simulated task predicates.")
         protocol["control_interface"] = hardware_kwargs.get("control", "cartesian")
@@ -323,12 +367,18 @@ def main(argv=None):
         return
     total_budget = args.total_budget or 100.
     per_budget = args.per_run_budget or 5.
+    released_previous_episode=False
     try:
         for row in runs:
             remaining = total_budget-data["budget_charge_usd"]
             if remaining <= 0:
                 row["status"] = "not_run_budget"
                 continue
+            if released_previous_episode:
+                if not wait_for_next_hardware_episode():
+                    data["status"]="stopped_operator"
+                    break
+                released_previous_episode=False
             scene = next(s for s in scenes if s["id"] == row["scene_id"])
             folder = out/row["run_folder"]
             wire = wire_for(row["model"])
@@ -409,9 +459,18 @@ def main(argv=None):
                         elif row.get("environment_success"):
                             row["status"] = "task_success"
                         save()
+                        if args.benchmark in HARDWARE_BENCHMARKS and args.hardware_mode=="execute":
+                            try:
+                                prompt_hardware_torque_release(env,row,keep_torque=args.keep_torque)
+                            finally:
+                                released_previous_episode=row.get("torque_disabled") is True
+                                save()
             print(json.dumps({k: row.get(k) for k in ("id", "status", "steps", "budget_charge_usd")}), flush=True)
             if transport.uncertain:
                 data["status"] = "stopped_usage_unknown"
+                break
+            if row.get("torque_release_status")=="failed":
+                data["status"]="stopped_torque_release"
                 break
             if args.benchmark in HARDWARE_BENCHMARKS and (row.get("hardware_stop_detail") or row["status"] == "error" or transport.blocked):
                 data["status"] = "stopped_hardware"

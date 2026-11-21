@@ -1,6 +1,7 @@
 """Device-side preflight and execution; does not import Inspect Robots or an LLM SDK."""
 from collections import deque
 import base64
+import csv
 import fcntl
 import hashlib
 import io
@@ -40,8 +41,11 @@ class HardwareRuntime:
         self.preview_enabled = self.settings["preview"] and mode != "mock"
         self.reference = None
         self.reference_image = reference_image
+        self.operator_mode = False
+        self.operator_label = ""
         self.approved = deque()
         self.plan_id = 0
+        self.replay_plan = None
         self.first_waypoint = False
         self.plan_start_motors = None
         self.started = False
@@ -54,12 +58,13 @@ class HardwareRuntime:
         self.last_images = None
         self.feedback = dict(accepted=True, position_error_m=0., orientation_error_rad=0., detail="ready")
         calibration = json.loads(Path(self.settings["calibration_file"]).read_text())
+        self.calibration = calibration
         if self.preview_enabled and not os.environ.get("DISPLAY"):
             self.events.close()
             raise ValueError("Hardware preview needs desktop DISPLAY; set preview=false for terminal-only operation")
         try:
             if mode == "mock":
-                self.driver = MockDriver()
+                self.driver = MockDriver(state_file=self.settings.get("mock_state_file"))
             else:
                 port_key = hashlib.sha256(os.path.realpath(self.settings["port"]).encode()).hexdigest()[:24]
                 self.serial_lock = (Path(tempfile.gettempdir())/f"llm_libero_so101_{port_key}.lock").open("a")
@@ -115,7 +120,7 @@ class HardwareRuntime:
     def _snapshot(self, calibration, config_path):
         files = dict(config=str(Path(config_path).resolve()), profile=self.settings["profile_file"],
                      calibration=self.settings["calibration_file"], urdf=self.profile["urdf"])
-        for name in ("runtime.py", "controller.py", "kinematics.py", "settings.py", "embodiment.py", "approver.py", "_worker.py"):
+        for name in ("runtime.py", "controller.py", "kinematics.py", "settings.py", "embodiment.py", "approver.py", "replay.py", "_worker.py"):
             files["adapter_"+name] = str(Path(__file__).with_name(name))
         if self.settings.get("reset_action_file"):
             files["reset"] = self.settings["reset_action_file"]
@@ -150,11 +155,13 @@ class HardwareRuntime:
         if self.preview_enabled:
             import cv2
             top = images["top"].copy()
-            if self.reference_image and self.reference is None:
+            if self.settings["reference_overlay"] and self.reference_image and self.reference is None:
                 self.reference = np.asarray(Image.open(self.reference_image).convert("RGB"))
-            if self.reference is not None:
+            if self.settings["reference_overlay"] and self.reference is not None:
                 overlay = cv2.resize(self.reference, (top.shape[1], top.shape[0]))
                 top = cv2.addWeighted(top, .65, overlay, .35, 0)
+            if self.operator_label:
+                cv2.putText(top,self.operator_label,(8,48),cv2.FONT_HERSHEY_SIMPLEX,.5,(255,220,40),1,cv2.LINE_AA)
             preview = np.concatenate([top, images["wrist"]], axis=1)
             title = "LLM_LIBERO SO-101: top reference overlay | wrist (q stops)"
             cv2.imshow(title, cv2.cvtColor(preview, cv2.COLOR_RGB2BGR))
@@ -211,9 +218,57 @@ class HardwareRuntime:
         return self.capture_observation()
 
     def start(self):
+        self.operator_mode = False
         self.started = True
         self.started_at = time.monotonic()
         self.controller.deadline = time.monotonic()+self.policy_seconds
+        return self.capture_observation()
+
+    def operator_view(self, reference_image, label):
+        """Untimed human setup/review. No reset or task action is performed."""
+        self.approved.clear()
+        self.replay_plan = None
+        self.started = False
+        self.started_at = None
+        self.operator_mode = True
+        self.controller.deadline = float("inf")
+        self.reference_image = reference_image
+        self.reference = None
+        self.operator_label = label
+        self.event("operator_view",reference_image=reference_image,label=label)
+        return self.capture_observation()
+
+    def operator_reset(self):
+        """One explicit keyboard reset, counted separately from agent actions."""
+        if not self.operator_mode:
+            raise ValueError("Manual reset is only available in operator setup/review mode")
+        if not self.settings.get("reset_action_file"):
+            raise ValueError("Operator reset requires reset_action_file")
+        target=json.loads(Path(self.settings["reset_action_file"]).read_text())
+        ctrl=self.controller
+        ctrl.check_stop()
+        ctrl.valid_motors(target)
+        self.approved.clear()
+        self.replay_plan=None
+        ctrl.steps=0
+        ctrl.max_steps=self.settings["reset_max_steps"]
+        ctrl.deadline=time.monotonic()+self.policy_seconds
+        try:
+            result=ctrl.reset(target)
+            self.event("operator_reset",target=target,result=result)
+            if result["status"] not in ("executed","planned_only"):
+                self.stopped=result.get("reason",result["status"])
+            if result["status"]=="executed":
+                goal=ctrl.last_gripper_motor_goal
+                ctrl.gripper_command=float(np.clip((goal-self.profile["gripper_open_motor"])/
+                    (self.profile["gripper_closed_motor"]-self.profile["gripper_open_motor"]),0,1))
+            self.feedback=dict(accepted=result["status"] in ("executed","planned_only"),position_error_m=0.,
+                               orientation_error_rad=0.,detail="operator_reset:"+result["status"])
+        finally:
+            self.reset_steps+=ctrl.steps
+            ctrl.steps=0
+            ctrl.max_steps=self.max_steps
+            ctrl.deadline=float("inf")
         return self.capture_observation()
 
     def _remaining(self):
@@ -223,6 +278,7 @@ class HardwareRuntime:
     def plan(self, targets):
         """Validate the entire upstream Cartesian chunk before allowing its first motor write."""
         self.approved.clear()
+        self.replay_plan = None
         self.controller.check_stop()
         if self.mode == "inspect":
             return dict(accepted=False, reason="Inspection mode has no motion planning/execution")
@@ -330,6 +386,95 @@ class HardwareRuntime:
         self.feedback["orientation_error_rad"] = float(np.max(np.abs(wrap(np.array([measured["pitch_rad"], measured["roll_rad"]])-np.asarray(target)[3:5]))))
         observed["feedback"] = self.feedback
         return observed
+
+    def prepare_replay(self, targets, *, source_hz=20, time_scale=2., source_start_step=1):
+        """Preflight a complete recording from fresh physical state, without motion."""
+        from .replay import plan_replay, ReplayRejected
+        self.replay_plan = None
+        self.approved.clear()
+        if self.mode == "inspect":
+            return dict(accepted=False, reason="Inspection mode cannot prepare motion")
+        self.controller.check_stop()
+        observed_at = time.monotonic()
+        current = self.driver.read_motors()
+        self.controller.valid_motors(current)
+        try:
+            plan = plan_replay(self.profile, self.calibration, targets, current,
+                source_hz=source_hz, time_scale=time_scale, max_steps=self._remaining(), source_start_step=source_start_step,
+                check_stop=self.controller.check_stop)
+            if time.monotonic()-observed_at > self.profile["observation_max_age_s"]:
+                raise ReplayRejected("Observation expired while preparing the replay")
+            self.plan_id += 1
+            plan.update(plan_id=self.plan_id, observation_monotonic_s=observed_at)
+            self.replay_plan = plan
+            (self.output/"replay_plan.json").write_text(json.dumps(plan))
+            result = dict(accepted=True, plan_id=self.plan_id, **plan["summary"])
+        except ReplayRejected as exc:
+            result = exc.report
+        (self.output/"replay_preflight.json").write_text(json.dumps(result,indent=2))
+        self.event("replay_preflight", result=result)
+        return result
+
+    def run_replay(self, plan_id):
+        """Execute only a complete cached plan; keep all controller stop guards."""
+        plan, self.replay_plan = self.replay_plan, None  # Single-use, including rejected attempts.
+        ctrl = self.controller
+        if plan is None or plan_id != plan["plan_id"]:
+            return dict(accepted=False, reason="Replay has no matching full-path preflight")
+        ctrl.check_stop()
+        current = self.driver.read_motors()
+        ctrl.valid_motors(current)
+        if time.monotonic()-plan["observation_monotonic_s"] > self.profile["observation_max_age_s"]:
+            return dict(accepted=False, reason="Replay start observation expired; prepare again")
+        if max(abs(current[n]-plan["start_motors"][n]) for n in MOTORS) > 2:
+            return dict(accepted=False, reason="Robot moved after replay preflight; prepare again")
+        self.planned_steps += len(plan["motor_targets"])
+        if self.mode == "dry-run":
+            return dict(accepted=True, status="planned_only", **plan["summary"])
+        started = time.monotonic()
+        peak_error = 0.
+        result = dict(status="executed")
+        completed = 0
+        columns = ["motor_step","source_step","elapsed_s","max_arm_error_deg","eef_error_m"]
+        columns += [f"{label}:{motor}" for label in ("commanded","measured_after") for motor in MOTORS]
+        with (self.output/"replay_tracking.csv").open("w",newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(columns)
+            try:
+                for index, vector in enumerate(plan["motor_targets"]):
+                    motors = dict(zip(MOTORS,vector))
+                    result = ctrl.execute_path([motors])
+                    self.event("replay_waypoint", motor_step=index+1,source_step=plan["source_steps"][index],result=result)
+                    if result["status"] != "executed":
+                        self.stopped = result.get("reason",result["status"])
+                        if result["status"] != "tracking_failed":
+                            self.hold()
+                        break
+                    completed += 1
+                    actual = self.driver.read_motors()
+                    ctrl.valid_motors(actual)
+                    error = max(abs(actual[n]-motors[n]) for n in MOTORS[:5])
+                    peak_error = max(peak_error,error)
+                    wanted_pose = ctrl.kinematics.forward(ctrl.kinematics.motor_to_model(motors))
+                    actual_pose = ctrl.kinematics.forward(ctrl.kinematics.motor_to_model(actual))
+                    position_error = float(np.linalg.norm(wanted_pose[:3,3]-actual_pose[:3,3]))
+                    writer.writerow([index+1,plan["source_steps"][index],time.monotonic()-started,error,position_error]
+                        +vector+[actual[n] for n in MOTORS])
+            except BaseException as exc:
+                self.stopped = str(exc) or type(exc).__name__
+                try:
+                    self.hold()
+                finally:
+                    result = dict(status="stopped",reason=self.stopped)
+                raise
+            finally:
+                report = dict(accepted=True,status="replayed" if completed == len(plan["motor_targets"]) else "hardware_stopped",
+                    completed_motor_steps=completed,elapsed_s=time.monotonic()-started,peak_arm_tracking_error_deg=peak_error,
+                    stop_detail=self.stopped,last_controller_result=result,device_mode=self.mode,
+                    real_api_calls=0,agent_cost_usd=0,physical_success=None,
+                    eef_error_source="Encoder FK in hardware profile frame; no external pose measurement")
+                (self.output/"replay_summary.json").write_text(json.dumps(report,indent=2))
+        return report
 
     def summary(self):
         return dict(steps=self.controller.steps if self.controller else 0, framework_steps=self.framework_steps,

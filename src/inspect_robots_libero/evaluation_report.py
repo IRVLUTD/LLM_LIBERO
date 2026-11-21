@@ -13,10 +13,10 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_DEFLATED
 
-EPISODE_FIELDS = ["id", "benchmark", "subset", "task_id", "variation", "repeat", "instruction",
+EPISODE_FIELDS = ["id", "benchmark", "subset", "task_id", "variation", "repeat", "attempt", "scene_order", "operator_verdict", "instruction",
     "model", "effort", "accounting_mode", "device_mode", "control_interface", "status", "termination_reasons", "steps", "simulated_seconds",
     "commanded_motion_seconds", "framework_steps", "planned_control_steps", "reset_control_steps", "motor_writes", "hold_writes",
-    "hardware_stop_detail", "stop_detail", "error_type",
+    "hardware_stop_detail", "stop_detail", "error_type", "torque_release_status", "torque_disabled",
     "upstream_steps", "upstream_step_info",
     "llm_calls", "http_attempts", "real_api_calls", "mock_calls", "usage_complete",
     "estimated_cost_usd", "known_cost_subtotal_usd", "mean_cost_per_call_usd",

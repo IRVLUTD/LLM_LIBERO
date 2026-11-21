@@ -233,6 +233,36 @@ class SO101HardwareEmbodiment(EmbodimentBase):
             truncated=(data["steps"] if self.mode in ("mock", "execute") else data["planned_control_steps"]) >= self.max_steps,
             termination_reason=reason, info={"success": None, "device_mode": self.mode})
 
+    def release_torque_after_close(self):
+        """Explicitly requested by the runner after its operator release prompt."""
+        if self.mode!="execute":
+            raise ValueError("Torque release is only available for physical execute mode")
+        if self.process is not None and self.process.poll() is None:
+            raise ValueError("Close the hardware worker before releasing torque")
+        config=self.output/"torque_release_config.json"
+        config.write_text(json.dumps(self.settings,indent=2))
+        output=self.output/"torque_release.json"
+        output.unlink(missing_ok=True)
+        worker_env={key:value for key,value in os.environ.items()
+                    if not any(word in key.upper() for word in ("API_KEY","TOKEN","SECRET"))}
+        try:
+            with (self.output/"torque_release.log").open("a") as log:
+                result=subprocess.run([self.settings["python"],"-u",str(Path(__file__).with_name("_release_torque.py")),
+                    "--config",str(config),"--output",str(output)],stdout=subprocess.PIPE,stderr=log,
+                    text=True,env=worker_env,timeout=30)
+            report=json.loads(output.read_text()) if output.is_file() else dict(status="failed",torque_disabled=None,
+                detail=f"Torque helper exited {result.returncode}; see torque_release.log")
+        except (OSError,subprocess.TimeoutExpired,ValueError) as exc:
+            report=dict(status="failed",torque_disabled=None,error_type=type(exc).__name__,detail=str(exc))
+            output.write_text(json.dumps(report,indent=2))
+        self.last={**(self.last or {}),"torque_release_status":report["status"],"torque_disabled":report["torque_disabled"]}
+        summary=self.output/"hardware_summary.json"
+        if summary.is_file():
+            data=json.loads(summary.read_text())
+            data.update(torque_release_status=report["status"],torque_disabled=report["torque_disabled"])
+            summary.write_text(json.dumps(data,indent=2))
+        return report
+
     def close(self):
         if self.process is None:
             return

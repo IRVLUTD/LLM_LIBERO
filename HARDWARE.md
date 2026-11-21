@@ -260,10 +260,151 @@ billed after motor execution has stopped. Independent hardware workers lock the
 serial port against other workers from this integration; close other robot
 control programs before using it.
 
-Normal exit preserves torque/hold, matching your prototype. Support and power
-down through your established hardware procedure. Software stop handling does
-not replace a physical emergency stop, and a lost serial connection cannot
-guarantee delivery of a hold command.
+Worker shutdown preserves torque/hold. For `run_replica_evaluation.py` physical
+execute episodes (both hardware benchmarks), the runner now saves results and
+then prompts:
+
+```text
+[END] Episode finished. Support the arm and remove/support any held object before releasing torque.
+Press ENTER to disable torque on all six SO-101 motors, or type keep to retain the hold:
+```
+
+This applies after model `done`, `give_up`, budget/step stops and evaluation
+errors whenever a hardware worker was opened. Enter reconnects to the same
+serial port solely to disable torque and verify `Torque_Enable=0` on all six
+motors, including the gripper. It never enables torque, sends a position goal,
+opens cameras, or changes calibration/PID settings. Calibration must still
+match the selected arm. The outcome is saved in `hardware/torque_release.json`,
+`hardware_summary.json`, and the evaluation spreadsheet's
+`torque_release_status` / `torque_disabled` fields. Release failure is reported
+and stops a multi-episode sweep.
+
+Typing `keep`, EOF, or a noninteractive terminal preserves the existing hold.
+`--keep-torque` skips this end prompt explicitly; `--auto-start` only skips the
+startup setup prompt. If another episode remains after confirmed release, the
+runner waits for Enter before reconnecting and re-enabling torque for that
+episode. End-prompt waiting and release time are excluded from the episode's
+reported wall time. Mock/dry-run episodes do not prompt or release torque.
+The separate trajectory replay script retains its existing hold-on-exit behavior.
+
+Software stop handling does not replace a physical emergency stop, and a lost
+serial connection cannot guarantee delivery of a hold or torque-release command.
+
+## Multi-scene agent session
+
+`scripts/run_vla_replica_agent.py` is a separate terminal-operated program for
+the following ordered ID queue, configured in
+`configs/vla_replica_agent_session.json`:
+
+| Task | Scenes |
+|---|---|
+| 2: bowl on coaster | 1, 3, 4 |
+| 4: fold towel | 1, 2, 5 |
+| 6: erase whiteboard | 1, 2, 4 |
+| 9: press button | 1, 3, 4 |
+| 10: blocks in box | 1, 3, 4 |
+
+Task instructions, counts, colors and references come from the selected catalog
+scenes. Each attempt uses the existing hardware benchmark and a new LLM
+conversation. Hindsight from previous tasks is not supplied to later tasks.
+
+Create a plan without devices or API calls:
+
+```bash
+python scripts/run_vla_replica_agent.py \
+  --hardware-config outputs/so101-hardware.json \
+  --model openai/gpt-6.1-sol --effort medium
+```
+
+An actual session uses explicit hardware/API modes and budgets. These $5/$75
+caps are examples, covering all retries within the session-wide limit:
+
+```bash
+python scripts/run_vla_replica_agent.py \
+  --hardware-config outputs/so101-hardware.json \
+  --hardware-mode execute --assume-calibration \
+  --model openai/gpt-6.1-sol --effort medium \
+  --max-calls 80 --max-steps 1800 --policy-seconds 900 \
+  --per-run-budget 5 --total-budget 75 \
+  --execute-paid-rollouts
+```
+
+Select `outputs/so101-hardware-fast.json` instead if you want the separately
+configured faster motion limits. `--initial-pose file.json` overrides the
+hardware config's `reset_action_file`; otherwise the existing startup pose is
+used. Initial pose values are validated against calibrated motor travel. The
+session never performs an automatic startup reset: each reset needs `r+Enter`.
+
+Terminal workflow:
+
+1. The reference overlay and live cameras open during **SETUP**. Clear the reset
+   path and remove/support held objects, then press `r+Enter` to reset. Arrange
+   the scene against its reference and press Enter to start the agent.
+2. During the attempt the operator preview shows clean camera images. The LLM
+   receives live images without the reference overlay. Pressing `q` in the
+   preview stops the worker; Ctrl+C stops the session.
+3. After model termination, the reference overlay returns. Enter `s` for human
+   confirmed success, `f` for failure, or `u` to leave it unscored. Model `done`
+   alone never becomes a physical success label.
+4. After success, `r` resets the arm and `n` or Enter advances to the next scene.
+   After failure/unscored results, `r` resets, `t` retries the same scene with a
+   fresh conversation, and `k` skips ahead. Reset is required before starting
+   the next attempt. Each retry gets a new folder and consumes the same session
+   budget. At setup, `k` skips an unstarted scene without recording a failure.
+5. Hardware faults pause for operator action. There is no automatic retry or
+   new task motion after a fault. Unknown API usage blocks subsequent attempts.
+   `q` ends the session. A connection failure offers explicit reconnect or quit.
+6. Torque stays enabled between scenes. At session end the existing Enter-to-
+   disable-torque prompt runs once. `--keep-torque-at-end` retains the hold.
+
+Human setup/scoring/reset waits do not consume the agent's episode deadline.
+Setup/reset videos, trajectories and motor counters live separately under
+`operator/`; they are not added to the agent's action-step counts. The default
+video recording includes both operator stages and individual attempts.
+
+Every invocation creates a new timestamped folder such as:
+
+```text
+outputs/VLAReplica_Agent/20261120_173747-0600_openai_gpt-6.1-sol_medium/
+  evaluation.json
+  evaluation.xlsx
+  episodes.csv
+  calls.csv
+  by_reasoning.csv
+  session_events.jsonl
+  human_labels.jsonl
+  hardware_profile.json
+  initial_pose.json
+  scenes/ID_task02_v01/scene.json
+  scenes/ID_task02_v01/reference.jpg
+  operator/001_ID_task02_v01_SETUP/
+  task02_scene01/attempt01/
+    evaluation.xlsx
+    ID_task02_v01_r01_m00_medium/
+      trajectory.json
+      api/
+      inspect/
+      hardware/rollout.mp4
+      hardware/motor_events.jsonl
+  task02_scene01/attempt02/
+  task02_scene03/attempt01/
+```
+
+Folder timestamps default to `America/Chicago` (`--timezone` can change this),
+and `--agent` optionally supplies a shorter agent label. Photos, profile, URDF,
+calibration and reset pose are copied into the session folder for reproducible
+configuration. The source kochIRVL repository is read-only. Session-wide reports
+retain every attempt, its calls/token costs, action counts and human label;
+per-attempt reports remain available as well. `--queue` selects a different
+explicit queue if needed. Interrupted sessions retain completed/partial results
+and mark unstarted attempts as not run.
+
+For offline checks use `--mock --hardware-mode mock`. `--operator-script` accepts
+a JSON array of terminal answers only with both mock devices and mock API
+responses. Mock arm state persists between its setup and episode workers, but
+it is not a physical simulation. Human mock/dry-run verdicts are logged as
+operator checks and never counted as physical success. No live hardware or
+paid API request is needed to test the workflow.
 
 ## Investigating a shoulder tracking stop
 
@@ -319,6 +460,124 @@ still fails to converge at the held goal, slowing the path is insufficient.
 Compare servo settings and measured responses with the successful teleoperation
 baseline before tuning motor gains. A larger tracking allowance by itself does
 not restore accurate end-effector positioning.
+
+## Replay simulation actions without an LLM
+
+`scripts/replay_replica_trajectory.py` reads a single saved simulation episode.
+`--track commands` (default) replays the Cartesian action requests saved by the
+framework; those can include targets rejected by the simulation IK.
+`--track observed` instead follows achieved poses from `trajectory.json`.
+Neither mode copies simulator joint radians directly into hardware motor degrees.
+The path is solved again with hardware IK and retimed to hardware speed limits.
+Inference pauses are omitted, and no LLM calls or API charges occur.
+
+Offline preparation opens no cameras or serial devices:
+
+```bash
+python scripts/replay_replica_trajectory.py \
+  --source outputs/task02_scene01_sol61_medium_01 \
+  --hardware-config outputs/so101-hardware-slow.json \
+  --max-source-steps 22 \
+  --output outputs/task02-scene01-replay-prepare-01
+```
+
+With the current profile and an unverified identity frame mapping, the full
+721-step source run fails preflight: 61 requested poses are below the hardware
+20 mm floor, with a minimum of 8.33 mm. Checking the above-floor prefix also
+rejects source step 23 at 0.1014 rad orientation error against the 0.1 rad limit.
+The first 22 source requests pass offline planning from the configured startup
+pose: 468 motor commands (including approach), at least 23.4 seconds. This short
+prefix covers initial approach/lifting/opening motions, not a full placement.
+The source simulation's scorer reported failure, despite the model calling done.
+
+After arranging the bowl and coaster, the selected physical prefix test is:
+
+```bash
+python scripts/replay_replica_trajectory.py \
+  --source outputs/task02_scene01_sol61_medium_01 \
+  --hardware-config outputs/so101-hardware-slow.json \
+  --mode execute --assume-calibration \
+  --max-source-steps 22 --time-scale 2 \
+  --output outputs/task02-scene01-hardware-replay22-01
+```
+
+The runner disables the fixed startup reset in a derived local configuration.
+Execute-mode connection establishes the existing measured-position hold; all
+replay/approach motion waits for a fresh full-path preflight and interactive
+`REPLAY` confirmation. The live plan starts from measured robot state, so its
+length or feasibility may differ from offline planning. An expired start
+observation or subsequent robot drift invalidates the plan. Other controllers
+must be closed. Camera preview, video, STOP file, tracking limits and wall-time
+checks use the existing hardware pipeline. There is no collision planner.
+
+`--mode dry-run` opens devices read-only and validates against measured state;
+`--mode mock` exercises the bridge on fake devices. The default `prepare` mode
+stays entirely offline. Use a new output directory for every invocation.
+
+Resume a recording with `--start-source-step 23`. This is one-based and retains
+the original source step numbers in plans, rejections and tracking CSVs.
+`--max-source-steps` limits the number of samples starting at that selected step.
+Offline validation can start from a saved motor pose via `--start-motors`;
+physical execution always replans from fresh measured state.
+
+When explicitly requested, `--retarget pitch-height` generates an adjusted path
+before the strict whole-path check. It preserves X/Y, tool roll and gripper
+commands, raises low heights above the existing floor with a position-error
+margin, and selects feasible tool pitch through hardware IK with a one-degree
+joint margin. It does not relax the runtime IK tolerance, calibrated motor
+travel, speeds, tracking limit or height floor. `retarget_report.json` lists all
+original/adjusted poses and maximum changes, and `retargeted_targets.json` saves
+the adjusted Cartesian path. The original recording is untouched.
+
+For the explicitly authorized continuation of task 2, the replay-only profile
+`outputs/so101-hardware-replay-rest.profile.json` extends the modeled wrist upper
+bound to its calibrated +102.54945 degrees. This is based on the user's assumed
+clearance, not a new physical calibration. The remaining 699 source samples
+require pitch changes up to 13.6 degrees and height increases up to 17.7 mm;
+the lowest adjusted target is 26 mm. The original 20 mm workspace floor and
+12-degree tracking guard remain. Its command is:
+
+```bash
+python scripts/replay_replica_trajectory.py \
+  --source outputs/task02_scene01_sol61_medium_01 \
+  --hardware-config outputs/so101-hardware-replay-rest.json \
+  --mode execute --assume-calibration \
+  --start-source-step 23 \
+  --start-motors outputs/so101-replay22-last-measured.json \
+  --retarget pitch-height --time-scale 2 \
+  --output outputs/task02-scene01-hardware-replay-rest-adjusted-02
+```
+
+Frame mapping is explicit and editable through `--frame-map path/to/map.json`:
+
+```json
+{
+  "schema_version": 1,
+  "verified": false,
+  "translation_m": [0, 0, 0],
+  "yaw_deg": 0,
+  "description": "Replace with measured simulation-world to hardware-world alignment"
+}
+```
+
+Default identity mapping is labeled unverified; execute mode requires a verified
+mapping or explicit `--assume-calibration`. Translation/yaw transform positions
+between Z-up frames; geometric pitch/roll and normalized gripper closure retain
+their meanings. No height offsets, workspace changes or relaxed IK thresholds
+are introduced automatically. `mapped_object_origins` in `replay_manifest.json`
+lists the scene object origins in the selected hardware world frame. These are
+provisional simulation positions, not measurements of the physical scene.
+
+Each preparation saves source/profile/calibration/code hashes, `frame_map.json`,
+`source_targets.csv`, a full `offline_preflight.json`, and (when valid)
+`offline_plan.json` plus `motor_targets.csv`. Physical/live-state planning also
+saves `hardware/replay_plan.json` and `hardware/replay_preflight.json`.
+`hardware/replay_tracking.csv` compares each sent command with encoders read
+after that control tick, including arm angular errors and encoder-FK Cartesian
+errors. These are tracking measurements, not externally measured tip accuracy.
+`hardware/replay_summary.json` records completion/stops, peak arm error, zero
+LLM calls/cost, and unknown physical task success. Standard motor events,
+hardware snapshots, STOP handling and video are retained.
 
 ## Artifacts, step definitions, and success labels
 
